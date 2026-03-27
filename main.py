@@ -1,15 +1,19 @@
 import pygame
 import math
 
-# --- CONFIGURAZIONE ---
-DIM_NODO = 40 
-LARGHEZZA, ALTEZZA = 800, 600
-NUM_COLONNE, NUM_RIGHE = LARGHEZZA // DIM_NODO, ALTEZZA // DIM_NODO
+# --- CONFIGURAZIONE MODIFICABILE ---
+X_TOT = 30  # Numero di colonne (scacchi in orizzontale)
+Y_TOT = 20  # Numero di righe (scacchi in verticale)
+DIM_NODO = 30 # Dimensione di ogni singolo scacco 
+
+# Il software calcola da solo la finestra in base a X_TOT e Y_TOT
+LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
+NUM_COLONNE, NUM_RIGHE = X_TOT, Y_TOT
 
 # Colori
 BIANCO, GRIGIO = (255, 255, 255), (210, 210, 210)
 ROSSO, BLU = (255, 0, 0), (0, 100, 255)
-NERO, GIALLO = (30, 30, 30), (255, 220, 0) # Muro Statico, Ostacolo Imprevisto
+NERO, GIALLO = (30, 30, 30), (255, 220, 0)
 
 class Nodo:
     def __init__(self, r, c):
@@ -17,14 +21,13 @@ class Nodo:
         self.x, self.y = c * DIM_NODO, r * DIM_NODO
         self.g = self.h = self.f = 0
         self.genitore = None
-        self.tipo = "libero" # "libero", "muro", "imprevisto"
+        self.tipo = "libero"
 
     def reset_calcoli(self):
         self.g = self.h = self.f = 0
         self.genitore = None
 
 def algoritmo_a_star(griglia, inizio_pos, fine_pos):
-    # Se meta o partenza sono ostacoli, nessun percorso
     if griglia[fine_pos[0]][fine_pos[1]].tipo != "libero" or \
        griglia[inizio_pos[0]][inizio_pos[1]].tipo != "libero":
         return []
@@ -54,30 +57,39 @@ def algoritmo_a_star(griglia, inizio_pos, fine_pos):
             r, c = attuale.r + m[0], attuale.c + m[1]
             if 0 <= r < NUM_RIGHE and 0 <= c < NUM_COLONNE:
                 vicino = griglia[r][c]
-                # Entrambi i tipi di ostacoli bloccano il percorso
                 if vicino in closed_list or vicino.tipo != "libero": continue
                 
-                # CALCOLO G PRECISO (Distanza Geometrica Reale)
-                # Questo risolve il problema della "collina", rendendo la traiettoria dritta
                 dist_geometrica = math.sqrt((vicino.x - attuale.x)**2 + (vicino.y - attuale.y)**2)
                 nuovo_g = attuale.g + dist_geometrica
                 
                 if vicino not in open_list or nuovo_g < vicino.g:
                     vicino.g = nuovo_g
-                    # Euristica h: Distanza Geometrica Reale (Euclidea)
                     vicino.h = math.sqrt((vicino.x - nodo_fine.x)**2 + (vicino.y - nodo_fine.y)**2)
                     vicino.f = vicino.g + vicino.h
                     vicino.genitore = attuale
                     if vicino not in open_list: open_list.append(vicino)
     return []
 
+def crea_bordi(griglia):
+    """Crea i muri neri perimetrali"""
+    for r in range(NUM_RIGHE):
+        for c in range(NUM_COLONNE):
+            # Se è la prima o l'ultima riga, o la prima o l'ultima colonna
+            if r == 0 or r == NUM_RIGHE - 1 or c == 0 or c == NUM_COLONNE - 1:
+                griglia[r][c].tipo = "muro"
+
 def main():
     pygame.init()
     screen = pygame.display.set_mode((LARGHEZZA, ALTEZZA))
-    pygame.display.set_caption("A* Interattivo: SX=Meta, DX=Cicla Ostacoli, R=Reset")
+    pygame.display.set_caption(f"Simulatore {X_TOT}x{Y_TOT} - SX: Meta, DX: Ostacoli, R: Reset")
     
     griglia = [[Nodo(r, c) for c in range(NUM_COLONNE)] for r in range(NUM_RIGHE)]
-    robot_pos = (NUM_RIGHE - 2, 1) # Basso a SX
+    
+    # Crea i bordi neri all'avvio
+    crea_bordi(griglia)
+
+    # Posiziona il robot all'interno dei bordi (riga 1, colonna 1)
+    robot_pos = (1, 1) 
     target_pos = None
     percorso = []
 
@@ -85,7 +97,6 @@ def main():
     while running:
         screen.fill(BIANCO)
         
-        # 1. Disegno Nodi, Muri e Ostacoli
         for riga in griglia:
             for n in riga:
                 if n.tipo == "muro":
@@ -94,53 +105,48 @@ def main():
                     pygame.draw.rect(screen, GIALLO, (n.x, n.y, DIM_NODO, DIM_NODO))
                 pygame.draw.rect(screen, GRIGIO, (n.x, n.y, DIM_NODO, DIM_NODO), 1)
 
-        # 2. Gestione Eventi e Mouse
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             
-            # Click Mouse
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = pygame.mouse.get_pos()
                 r, c = my // DIM_NODO, mx // DIM_NODO
                 
-                # Click Sinistro (1) -> Imposta Meta
-                if event.button == 1:
-                    if 0 <= r < NUM_RIGHE and 0 <= c < NUM_COLONNE:
+                if 0 <= r < NUM_RIGHE and 0 <= c < NUM_COLONNE:
+                    # Impedisce di sovrascrivere i bordi esterni
+                    if r == 0 or r == NUM_RIGHE - 1 or c == 0 or c == NUM_COLONNE - 1:
+                        continue
+
+                    if event.button == 1:
                         target_pos = (r, c)
-                
-                # Click Destro (3) -> Cicla Ostacoli (Libero -> Nero -> Giallo)
-                elif event.button == 3:
-                    if 0 <= r < NUM_RIGHE and 0 <= c < NUM_COLONNE:
+                    elif event.button == 3:
                         if griglia[r][c].tipo == "libero":
-                            griglia[r][c].tipo = "muro" # Guadagno Infinito, Statico
+                            griglia[r][c].tipo = "muro"
                         elif griglia[r][c].tipo == "muro":
-                            griglia[r][c].tipo = "imprevisto" # Guadagno Infinito, Imprevisto
+                            griglia[r][c].tipo = "imprevisto"
                         else:
                             griglia[r][c].tipo = "libero"
 
-            # Tasto 'R' sulla tastiera -> Reset Mappa
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_r:
                     for riga in griglia:
                         for n in riga:
                             n.tipo = "libero"
+                    crea_bordi(griglia) # Ricrea i bordi dopo il reset
                     percorso, target_pos = [], None
 
-        # 3. Ricalcolo dinamico percorso se c'è un target
         if target_pos:
             percorso = algoritmo_a_star(griglia, robot_pos, target_pos)
 
-        # 4. Disegno Percorso (Linea Rossa)
         if percorso:
             punti = [(n.c * DIM_NODO + DIM_NODO//2, n.r * DIM_NODO + DIM_NODO//2) for n in percorso]
             if len(punti) > 1:
-                pygame.draw.lines(screen, ROSSO, False, punti, 4)
+                pygame.draw.lines(screen, ROSSO, False, punti, 3)
         
-        # 5. Disegno Robot (Blu) e Meta (Rosso)
-        pygame.draw.circle(screen, BLU, (robot_pos[1]*DIM_NODO + 20, robot_pos[0]*DIM_NODO + 20), 15)
+        pygame.draw.circle(screen, BLU, (robot_pos[1]*DIM_NODO + DIM_NODO//2, robot_pos[0]*DIM_NODO + DIM_NODO//2), DIM_NODO//3)
         if target_pos:
-            pygame.draw.circle(screen, ROSSO, (target_pos[1]*DIM_NODO + 20, target_pos[0]*DIM_NODO + 20), 10, 2)
+            pygame.draw.circle(screen, ROSSO, (target_pos[1]*DIM_NODO + DIM_NODO//2, target_pos[0]*DIM_NODO + DIM_NODO//2), DIM_NODO//4, 2)
 
         pygame.display.flip()
 
