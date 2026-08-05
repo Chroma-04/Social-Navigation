@@ -1,10 +1,16 @@
+import os
+os.environ["SDL_VIDEO_CENTERED"] = "1"
 import pygame
 import math
+import json
 
 # --- CONFIGURAZIONE ---
+X_TOT, Y_TOT = 80, 60
 DIM_NODO = 30
 LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
-VELOCITA_ROBOT = 1.5 
+VELOCITA_ROBOT = 1.5
+FILE_MAPPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json")
+PASSWORD_SALVATAGGIO = "1258"
 
 # Colori
 BIANCO, GRIGIO = (255, 255, 255), (210, 210, 210)
@@ -74,11 +80,42 @@ def crea_bordi(griglia):
             if r == 0 or r == Y_TOT - 1 or c == 0 or c == X_TOT - 1:
                 griglia[r][c].tipo = "muro"
 
+def salva_mappa(griglia, path):
+    muri = [[n.r, n.c] for riga in griglia for n in riga if n.tipo == "muro"]
+    with open(path, "w") as f:
+        json.dump(muri, f)
+
+def carica_mappa(griglia, path):
+    if not os.path.exists(path):
+        return False
+    with open(path, "r") as f:
+        muri = json.load(f)
+    for riga in griglia:
+        for n in riga:
+            n.tipo = "libero"
+    for r, c in muri:
+        if 0 <= r < Y_TOT and 0 <= c < X_TOT:
+            griglia[r][c].tipo = "muro"
+    crea_bordi(griglia)
+    return True
+
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((LARGHEZZA, ALTEZZA))
-    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W")
+    fullscreen = False
+
+    # Adatta la finestra iniziale allo schermo (max 90% di larghezza/altezza disponibili)
+    info = pygame.display.Info()
+    win_w = min(LARGHEZZA, int(info.current_w * 0.9))
+    win_h = min(ALTEZZA, int(info.current_h * 0.9))
+    screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+    pygame.key.start_text_input()
+    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | F11: Fullscreen | F5: Salva | F9: Carica")
     clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 32)
+
+    chiedendo_password = False
+    input_password = ""
+    errore_timer = 0
     
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
@@ -114,7 +151,10 @@ def main():
         # 2. Eventi
         for event in pygame.event.get():
             if event.type == pygame.QUIT: running = False
-            
+
+            if event.type == pygame.VIDEORESIZE and not fullscreen:
+                screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 4: zoom *= 1.1 # Zoom In
                 elif event.button == 5: zoom /= 1.1 # Zoom Out
@@ -147,7 +187,25 @@ def main():
                     if 0 < r < Y_TOT - 1 and 0 < c < X_TOT - 1:
                         griglia[r][c].tipo = "muro"
 
+            if event.type == pygame.TEXTINPUT and chiedendo_password:
+                input_password += event.text
+
             if event.type == pygame.KEYDOWN:
+                if chiedendo_password:
+                    if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                        if input_password == PASSWORD_SALVATAGGIO:
+                            salva_mappa(griglia, FILE_MAPPA)
+                            chiedendo_password = False
+                        else:
+                            errore_timer = 90
+                        input_password = ""
+                    elif event.key == pygame.K_ESCAPE:
+                        chiedendo_password = False
+                        input_password = ""
+                    elif event.key == pygame.K_BACKSPACE:
+                        input_password = input_password[:-1]
+                    continue
+
                 # Toggle muro singolo con pressione singola di W (opzionale)
                 if event.key == pygame.K_w:
                     mpos = pygame.mouse.get_pos()
@@ -163,6 +221,23 @@ def main():
                     robot_x, robot_y = 1.5 * DIM_NODO, 1.5 * DIM_NODO
                     target_pos, percorso = None, []
                 if event.key == pygame.K_s: target_pos, percorso = None, []
+
+                if event.key == pygame.K_F5:
+                    chiedendo_password = True
+                    input_password = ""
+                if event.key == pygame.K_F9:
+                    if carica_mappa(griglia, FILE_MAPPA):
+                        target_pos, percorso = None, []
+
+                if event.key == pygame.K_F11:
+                    fullscreen = not fullscreen
+                    if fullscreen:
+                        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+                    else:
+                        screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+                elif event.key == pygame.K_ESCAPE and fullscreen:
+                    fullscreen = False
+                    screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
 
         # 3. Movimento (Invariato)
         if target_pos:
@@ -197,6 +272,27 @@ def main():
         if target_pos:
             tx, ty = t_s(target_pos[1]*DIM_NODO + DIM_NODO//2, target_pos[0]*DIM_NODO + DIM_NODO//2)
             pygame.draw.circle(screen, ROSSO, (tx, ty), int((DIM_NODO//4) * zoom), 2)
+
+        # 5. Overlay richiesta password (salvataggio F5)
+        if errore_timer > 0:
+            errore_timer -= 1
+        if chiedendo_password or errore_timer > 0:
+            box_w, box_h = 360, 110
+            box_x, box_y = (screen.get_width() - box_w) // 2, (screen.get_height() - box_h) // 2
+            pygame.draw.rect(screen, BIANCO, (box_x, box_y, box_w, box_h))
+            pygame.draw.rect(screen, NERO, (box_x, box_y, box_w, box_h), 2)
+
+            titolo = font.render("Password per salvare (Invio/Esc)", True, NERO)
+            screen.blit(titolo, (box_x + 15, box_y + 15))
+
+            mascherata = "*" * len(input_password)
+            campo = font.render(mascherata if mascherata else " ", True, NERO)
+            pygame.draw.rect(screen, GRIGIO, (box_x + 15, box_y + 50, box_w - 30, 30), 1)
+            screen.blit(campo, (box_x + 20, box_y + 55))
+
+            if errore_timer > 0:
+                errore_txt = font.render("Password errata", True, ROSSO)
+                screen.blit(errore_txt, (box_x + 15, box_y + 85))
 
         pygame.display.flip()
         clock.tick(60)
