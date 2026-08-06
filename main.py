@@ -16,8 +16,9 @@ ATTESA_PERSONA_MIN_FRAME = 1 * 60  # attesa minima dopo l'arrivo, in frame (60 F
 ATTESA_PERSONA_MAX_FRAME = 4 * 60  # attesa massima dopo l'arrivo, in frame
 PROBABILITA_PERCORSO_BREVE = 0.35  # probabilita' che la prossima destinazione sia vicina invece che casuale ovunque
 RAGGIO_PERCORSO_BREVE = DIM_NODO * 6  # distanza massima (in pixel) per un "percorso breve"
-RANGE_EVITAMENTO_PERSONE = 15  # px: sotto questa distanza da un'altra persona ci si ferma
-NUDGE_ALLONTANAMENTO = 2  # px per frame di allontanamento quando bloccati, per rompere lo stallo
+RANGE_EVITAMENTO_PERSONE = 15  # px: sotto questa distanza da un'altra persona scatta una spinta di repulsione
+FORZA_REPULSIONE_PERSONE = 1.3  # px/frame massimi di spinta continua fra persone/corridori/leader (a distanza 0)
+COSTO_CELLA_OCCUPATA = DIM_NODO * 10  # penalita' di costo A* per una cella occupata da un'altra entita': forte ma non un divieto assoluto (evita percorsi vuoti nei passaggi a 1 cella)
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
 FILE_MAPPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json")
@@ -26,13 +27,31 @@ VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 3.0
 NUMERO_PERSONE_DEFAULT = 0
 NUMERO_PERSONE_MAX = 50
 NUMERO_PERSONE_FERME_DEFAULT = 0
-NUMERO_PERSONE_FERME_MAX = 50
+NUMERO_PERSONE_FERME_MAX = 200
+NUMERO_CORRIDORI_DEFAULT = 0
+NUMERO_CORRIDORI_MAX = 50
+FATTORE_VELOCITA_CORRIDORE = 2.0  # i corridori vanno sempre al doppio della velocita' base
+NUMERO_GRUPPI_DEFAULT = 0
+NUMERO_GRUPPI_MAX = 50
+GRUPPO_MEMBRI_MIN, GRUPPO_MEMBRI_MAX = 2, 7
+GRUPPO_MEMBRI_MEDIA = 3.5  # numero di componenti a gaussiana: piu' probabile intorno a 3-4, raro vicino a 2 o 7
+GRUPPO_MEMBRI_DEV_STD = 1.1
+GRUPPO_RAGGIO_FORMAZIONE_PX = int(DIM_NODO * 1.0)  # distanza di base dei membri dal leader/ancora
+GRUPPO_RUMORE_RAGGIO = 0.3  # +-30% di variazione casuale sul raggio di ciascun membro: forma meno geometrica/perfetta
+GRUPPO_RUMORE_ANGOLO = 0.4  # rad di variazione casuale sull'angolo di ciascun membro rispetto alla spaziatura regolare
+PROBABILITA_GRUPPO_MOBILE = 0.8  # l'80% dei gruppi si muove, il 20% resta fermo
+GRUPPO_DISTANZA_COESIONE_PX = int(DIM_NODO * 1.5)  # sotto questa distanza dal leader non scatta la rincorsa: e' gia' abbastanza vicino
+GRUPPO_FATTORE_RINCORSA_MAX = 2.5  # quanto puo' accelerare al massimo un membro lontano dal leader per riprenderlo
+GRUPPO_FRAME_BLOCCO_SOGLIA = 90  # frame (~1.5s) fermo prima di rinunciare all'obiettivo del gruppo e puntare dritto al leader
+GRUPPO_DISTANZA_MAX_DIVERGENZA_PX = int(DIM_NODO * 5)  # oltre questa distanza dal leader (anche se in movimento, non bloccato) punta dritto a lui: il proprio A* potrebbe aver imboccato una rotta completamente diversa dalla sua
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
 RAGGIO_SICUREZZA_DEFAULT = 20
 ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
-VARIAZIONE_VELOCITA_PERSONA = 0.15  # +-15% di velocita' individuale casuale
+FATTORE_VELOCITA_MEDIA = 1.0    # media della gaussiana (1.0 = velocita' base)
+FATTORE_VELOCITA_DEV_STD = 0.25  # deviazione standard: la maggior parte cammina, code = passeggiano/corrono
+FATTORE_VELOCITA_MIN, FATTORE_VELOCITA_MAX = 0.4, 2.5  # limiti per evitare fermi o assurdamente veloci
 RUMORE_PERCORSO_PERSONA = 15  # quanto i percorsi delle persone si discostano dall'ottimo matematico (0 = disattivato)
 
 # Colori
@@ -92,13 +111,23 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
             if 0 <= r < Y_TOT and 0 <= c < X_TOT:
                 vicino = griglia[r][c]
                 if vicino in closed_list or vicino.tipo == "muro": continue
-                if celle_bloccate and (r, c) in celle_bloccate: continue
+                if m[0] != 0 and m[1] != 0:
+                    # movimento diagonale: vietato se taglia l'angolo tra due muri adiacenti, altrimenti
+                    # il grafo lo considera valido ma in coordinate continue e' un passo impossibile da
+                    # compiere (passo_movimento lo respinge sempre) - la persona restava bloccata per sempre
+                    if griglia[attuale.r][c].tipo == "muro" or griglia[r][attuale.c].tipo == "muro":
+                        continue
                 dist = math.sqrt((vicino.cx - attuale.cx)**2 + (vicino.cy - attuale.cy)**2)
                 if rumore_seed is not None:
                     # rumore deterministico per cella+persona: la stessa persona rifa' sempre
                     # la stessa scelta di "corsia" ricalcolando, invece di zigzagare a caso
                     perturbazione = math.sin(vicino.r * 12.9898 + vicino.c * 78.233 + rumore_seed) * RUMORE_PERCORSO_PERSONA
                     dist = max(1.0, dist + perturbazione)
+                if celle_bloccate and (r, c) in celle_bloccate:
+                    # penalita' pesante, non un divieto assoluto: se esiste un'alternativa la preferisce,
+                    # ma se quella cella occupata e' l'unico passaggio (es. una porta larga 1 cella) la
+                    # attraversa comunque invece di restituire un percorso vuoto e restare bloccata per sempre
+                    dist += COSTO_CELLA_OCCUPATA
                 nuovo_g = attuale.g + dist
                 if vicino not in in_open or nuovo_g < in_open[vicino]:
                     vicino.g = nuovo_g
@@ -137,6 +166,20 @@ def cella_libera_casuale(griglia):
     libere = [n for riga in griglia for n in riga if n.tipo == "libero"]
     return random.choice(libere)
 
+def cella_libera_3x3_casuale(griglia):
+    """Cella libera con un blocco 3x3 di celle libere attorno a se' (se stessa inclusa): garantisce che un
+    gruppo abbia davvero spazio per generarsi, invece di nascere incastrato contro un muro. Se non ne trova
+    (mappa molto densa di muri), ripiega su una cella libera qualsiasi."""
+    candidate = [
+        griglia[r][c]
+        for r in range(1, Y_TOT - 1) for c in range(1, X_TOT - 1)
+        if griglia[r][c].tipo == "libero"
+        and all(griglia[r + dr][c + dc].tipo == "libero" for dr in (-1, 0, 1) for dc in (-1, 0, 1))
+    ]
+    if candidate:
+        return random.choice(candidate)
+    return cella_libera_casuale(griglia)
+
 def cella_libera_vicina(griglia, x, y, raggio):
     """Cella libera entro un certo raggio da (x, y), per generare percorsi brevi. Se non ne trova, ripiega su una casuale."""
     vicine = [n for riga in griglia for n in riga if n.tipo == "libero" and math.hypot(n.cx - x, n.cy - y) <= raggio]
@@ -144,7 +187,9 @@ def cella_libera_vicina(griglia, x, y, raggio):
         return random.choice(vicine)
     return cella_libera_casuale(griglia)
 
-def crea_persona(griglia):
+def crea_persona(griglia, fattore_velocita=None):
+    if fattore_velocita is None:
+        fattore_velocita = max(FATTORE_VELOCITA_MIN, min(FATTORE_VELOCITA_MAX, random.gauss(FATTORE_VELOCITA_MEDIA, FATTORE_VELOCITA_DEV_STD)))
     nodo_iniziale = cella_libera_casuale(griglia)
     nodo_target = cella_libera_casuale(griglia)
     return {
@@ -154,13 +199,17 @@ def crea_persona(griglia):
         "stato": "movimento",
         "attesa_timer": 0,
         "rumore_seed": random.uniform(0, 1000),
-        "fattore_velocita": random.uniform(1 - VARIAZIONE_VELOCITA_PERSONA, 1 + VARIAZIONE_VELOCITA_PERSONA),
+        "fattore_velocita": fattore_velocita,
         "offset_ricalcolo": random.randint(0, INTERVALLO_RICALCOLO_PERSONE_FRAME - 1),
+        "priorita": random.random(),  # per rompere gli stalli simmetrici: a parita' di distanza, chi ha priorita' minore cede il passo
     }
 
-def sincronizza_persone(persone, numero, griglia):
+def crea_corridore(griglia):
+    return crea_persona(griglia, fattore_velocita=FATTORE_VELOCITA_CORRIDORE)
+
+def sincronizza_persone(persone, numero, griglia, fabbrica=crea_persona):
     while len(persone) < numero:
-        persone.append(crea_persona(griglia))
+        persone.append(fabbrica(griglia))
     while len(persone) > numero:
         persone.pop()
 
@@ -174,39 +223,131 @@ def sincronizza_persone_ferme(persone_ferme, numero, griglia):
     while len(persone_ferme) > numero:
         persone_ferme.pop()
 
-def allontanati(x, y, altra_x, altra_y, distanza, griglia):
-    """Sposta (x, y) di un piccolo passo lontano da (altra_x, altra_y), senza attraversare muri."""
-    dx, dy = x - altra_x, y - altra_y
-    dist = math.hypot(dx, dy)
-    if dist < 1e-6:
-        angolo = random.uniform(0, 2 * math.pi)
-        dx, dy = math.cos(angolo), math.sin(angolo)
-        dist = 1
-    nx, ny = x + (dx / dist) * distanza, y + (dy / dist) * distanza
+def offset_formazione_gruppo(numero_altri_membri):
+    """Posizioni disposte grossomodo in cerchio attorno al leader/ancora, con un po' di rumore casuale su
+    raggio e angolo di ciascun membro: forma piu' organica e meno geometricamente perfetta di un cerchio esatto."""
+    if numero_altri_membri <= 0:
+        return []
+    angolo_iniziale = random.uniform(0, 2 * math.pi)
+    offset = []
+    for i in range(numero_altri_membri):
+        angolo = angolo_iniziale + 2 * math.pi * i / numero_altri_membri + random.uniform(-GRUPPO_RUMORE_ANGOLO, GRUPPO_RUMORE_ANGOLO)
+        raggio = GRUPPO_RAGGIO_FORMAZIONE_PX * random.uniform(1 - GRUPPO_RUMORE_RAGGIO, 1 + GRUPPO_RUMORE_RAGGIO)
+        offset.append((raggio * math.cos(angolo), raggio * math.sin(angolo)))
+    return offset
+
+def crea_gruppo(griglia):
+    """Gruppo di 2-7 persone. Se fermo: cluster statico attorno a un'ancora. Se mobile: membri alla pari,
+    tutti con lo stesso obiettivo (target_comune) e ognuno col proprio A* indipendente (quindi superano porte
+    e corridoi stretti mettendosi in fila esattamente come le persone singole, senza formazione rigida) - chi
+    resta indietro accelera in proporzione alla distanza dal leader (membri[0]) invece di essere attratto/
+    trascinato verso di lui, e se resta bloccato a lungo ripiega su un percorso diretto verso la sua posizione."""
+    numero_membri = round(random.gauss(GRUPPO_MEMBRI_MEDIA, GRUPPO_MEMBRI_DEV_STD))
+    numero_membri = max(GRUPPO_MEMBRI_MIN, min(GRUPPO_MEMBRI_MAX, numero_membri))
+
+    if random.random() < PROBABILITA_GRUPPO_MOBILE:
+        ancora = cella_libera_3x3_casuale(griglia)
+        nodo_target = cella_libera_casuale(griglia)
+        target_comune = (nodo_target.r, nodo_target.c)
+        # un gruppo cammina tutto alla stessa andatura (estratta una volta sola, come per le persone singole)
+        # invece che ogni membro con una velocita' indipendente: altrimenti si sfaldano anche senza congestione
+        fattore_velocita_gruppo = max(FATTORE_VELOCITA_MIN, min(FATTORE_VELOCITA_MAX, random.gauss(FATTORE_VELOCITA_MEDIA, FATTORE_VELOCITA_DEV_STD)))
+        # stesso motivo per il rumore del percorso: se ogni membro calcola l'A* con un rumore_seed diverso,
+        # ognuno preferisce una "corsia" leggermente diversa e puo' finire su un percorso molto piu' lungo
+        # degli altri anche in area completamente aperta, restando indietro senza nessun ostacolo reale
+        rumore_seed_gruppo = random.uniform(0, 1000)
+        membri = []
+        for dx, dy in offset_formazione_gruppo(numero_membri):
+            nodo_spawn = cella_libera_vicina(griglia, ancora.cx + dx, ancora.cy + dy, DIM_NODO * 2)
+            p = crea_persona(griglia, fattore_velocita=fattore_velocita_gruppo)
+            p["x"], p["y"] = nodo_spawn.cx, nodo_spawn.cy
+            p["target"] = target_comune
+            p["rumore_seed"] = rumore_seed_gruppo
+            membri.append(p)
+        gruppo = {"mobile": True, "membri": membri, "target_comune": target_comune}
+        membri[0]["capofila"] = True  # decide quando il gruppo si ferma/riparte verso una nuova destinazione condivisa
+        for m in membri:
+            m["gruppo"] = gruppo
+        return gruppo
+
+    ancora = cella_libera_3x3_casuale(griglia)
+    membri = [{"x": ancora.cx, "y": ancora.cy, "r": ancora.r, "c": ancora.c}]
+    for dx, dy in offset_formazione_gruppo(numero_membri - 1):
+        mx, my = ancora.cx + dx, ancora.cy + dy
+        r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
+        if not (0 <= r < Y_TOT and 0 <= c < X_TOT and griglia[r][c].tipo != "muro"):
+            mx, my, r, c = ancora.cx, ancora.cy, ancora.r, ancora.c
+        membri.append({"x": mx, "y": my, "r": r, "c": c})
+    return {"mobile": False, "membri": membri}
+
+def sincronizza_gruppi(gruppi, numero, griglia):
+    while len(gruppi) < numero:
+        gruppi.append(crea_gruppo(griglia))
+    while len(gruppi) > numero:
+        gruppi.pop()
+
+def repulsione_vicini(entita, vicini, range_evitamento_quad):
+    """Vettore di spinta continua lontano dai vicini entro il raggio di evitamento: piu' vicino = spinta piu'
+    forte, in modo proporzionale (non un blocco secco a scatti). Chi ha priorita' minore viene spinto con piu'
+    forza, chi ha priorita' maggiore devia pochissimo: cosi' in un incrocio qualcuno passa sempre per primo,
+    con una transizione fluida invece di uno stallo oscillante."""
+    rep_x, rep_y = 0.0, 0.0
+    for v in vicini:
+        if v is entita:
+            continue
+        dx, dy = entita["x"] - v["x"], entita["y"] - v["y"]
+        d2 = dx * dx + dy * dy
+        if 0 < d2 < range_evitamento_quad:
+            d = math.sqrt(d2)
+            peso = (RANGE_EVITAMENTO_PERSONE - d) / RANGE_EVITAMENTO_PERSONE
+            peso *= max(0.15, 1.0 + (v.get("priorita", 0.5) - entita.get("priorita", 0.5)))
+            rep_x += (dx / d) * peso
+            rep_y += (dy / d) * peso
+    return rep_x, rep_y
+
+def sposta_con_vettore(x, y, vx, vy, forza, griglia):
+    """Applica lo spostamento (vx, vy) * forza (repulsione o attrazione), senza attraversare muri."""
+    if vx == 0 and vy == 0:
+        return x, y
+    nx, ny = x + vx * forza, y + vy * forza
     r, c = int(ny // DIM_NODO), int(nx // DIM_NODO)
     if 0 <= r < Y_TOT and 0 <= c < X_TOT and griglia[r][c].tipo != "muro":
         return nx, ny
     return x, y
 
-def passo_movimento(x, y, percorso, velocita, nodo_target):
-    """Avanza di un passo lungo il percorso. Ritorna (nuovo_x, nuovo_y, arrivato_a_destinazione).
+def passo_movimento(x, y, percorso, velocita, nodo_target, griglia):
+    """Avanza di un passo lungo il percorso. Ritorna (nuovo_x, nuovo_y, arrivato_a_destinazione, bloccato).
     Consuma i nodi intermedi man mano che vengono raggiunti, cosi' il percorso resta
-    percorribile per piu' frame anche se non viene ricalcolato ad ogni frame."""
+    percorribile per piu' frame anche se non viene ricalcolato ad ogni frame. `bloccato` e' True quando il
+    passo verso il prossimo nodo taglierebbe un muro (es. l'entita' e' stata spostata fuori dalla linea del
+    percorso da repulsione/coesione): il chiamante dovrebbe forzare un ricalcolo immediato invece di aspettare
+    il prossimo intervallo periodico, altrimenti l'entita' resterebbe ferma inutilmente per diversi frame."""
     if len(percorso) > 1:
         tx, ty = percorso[1].cx, percorso[1].cy
     elif len(percorso) == 1:
         tx, ty = nodo_target.cx, nodo_target.cy
     else:
-        return x, y, False
+        return x, y, False, False
 
     dx, dy = tx - x, ty - y
     dist = math.sqrt(dx**2 + dy**2)
+
+    if len(percorso) <= 1 and dist <= RANGE_EVITAMENTO_PERSONE:
+        # gia' abbastanza vicina alla destinazione finale (entro il raggio di repulsione): la considera
+        # arrivata senza teletrasportarla sul punto esatto (che con piu' persone dirette allo stesso target
+        # le farebbe sovrapporre tutte nello stesso pixel) - resta dov'e', a distanza naturale dagli altri
+        return x, y, True, False
+
     if dist > velocita:
-        return x + (dx / dist) * velocita, y + (dy / dist) * velocita, False
+        nx, ny = x + (dx / dist) * velocita, y + (dy / dist) * velocita
+        r, c = int(ny // DIM_NODO), int(nx // DIM_NODO)
+        if not (0 <= r < Y_TOT and 0 <= c < X_TOT) or griglia[r][c].tipo == "muro":
+            return x, y, False, True
+        return nx, ny, False, False
 
     if len(percorso) > 1:
         percorso.pop(0)
-    return tx, ty, len(percorso) <= 1
+    return tx, ty, len(percorso) <= 1, False
 
 def salva_mappa(griglia, path):
     muri = [[n.r, n.c] for riga in griglia for n in riga if n.tipo == "muro"]
@@ -264,9 +405,17 @@ def main():
     numero_persone = NUMERO_PERSONE_DEFAULT
     persone = [crea_persona(griglia) for _ in range(numero_persone)]
 
+    # --- CORRIDORI (persone al doppio della velocita' base) ---
+    numero_corridori = NUMERO_CORRIDORI_DEFAULT
+    corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
+
     # --- PERSONE FERME (ostacoli statici) ---
     numero_persone_ferme = NUMERO_PERSONE_FERME_DEFAULT
     persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
+
+    # --- GRUPPI ---
+    numero_gruppi = NUMERO_GRUPPI_DEFAULT
+    gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
 
     # --- PANNELLO TECNICO ---
     pannello_aperto = False
@@ -274,8 +423,12 @@ def main():
     trascinando_slider = False
     modificando_persone = False
     input_numero_persone = ""
+    modificando_corridori = False
+    input_numero_corridori = ""
     modificando_persone_ferme = False
     input_numero_persone_ferme = ""
+    modificando_gruppi = False
+    input_numero_gruppi = ""
     raggio_sicurezza = RAGGIO_SICUREZZA_DEFAULT
     trascinando_raggio = False
 
@@ -309,12 +462,14 @@ def main():
                     pygame.draw.rect(screen, GRIGIO, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 300, 260
+        panel_w, panel_h = 300, 325
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
-        numero_box_rect = pygame.Rect(panel_rect.x + 150, panel_rect.y + 100, 60, 30)
-        numero_ferme_box_rect = pygame.Rect(panel_rect.x + 150, panel_rect.y + 135, 60, 30)
-        slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 205, panel_w - 30, 8)
+        numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
+        numero_corridori_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 135, 70, 30)
+        numero_gruppi_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 170, 70, 30)
+        numero_ferme_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 205, 70, 30)
+        slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 275, panel_w - 30, 8)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -326,13 +481,23 @@ def main():
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1 and modificando_persone and not numero_box_rect.collidepoint(event.pos):
                     modificando_persone = False  # click fuori dal campo: annulla la modifica
+                if event.button == 1 and modificando_corridori and not numero_corridori_box_rect.collidepoint(event.pos):
+                    modificando_corridori = False
                 if event.button == 1 and modificando_persone_ferme and not numero_ferme_box_rect.collidepoint(event.pos):
                     modificando_persone_ferme = False
+                if event.button == 1 and modificando_gruppi and not numero_gruppi_box_rect.collidepoint(event.pos):
+                    modificando_gruppi = False
 
                 if event.button == 1 and pannello_aperto and panel_rect.collidepoint(event.pos):
                     if numero_box_rect.collidepoint(event.pos):
                         modificando_persone = True
                         input_numero_persone = str(numero_persone)
+                    elif numero_corridori_box_rect.collidepoint(event.pos):
+                        modificando_corridori = True
+                        input_numero_corridori = str(numero_corridori)
+                    elif numero_gruppi_box_rect.collidepoint(event.pos):
+                        modificando_gruppi = True
+                        input_numero_gruppi = str(numero_gruppi)
                     elif numero_ferme_box_rect.collidepoint(event.pos):
                         modificando_persone_ferme = True
                         input_numero_persone_ferme = str(numero_persone_ferme)
@@ -394,8 +559,12 @@ def main():
                     input_password += event.text
                 elif modificando_persone and event.text.isdigit():
                     input_numero_persone += event.text
+                elif modificando_corridori and event.text.isdigit():
+                    input_numero_corridori += event.text
                 elif modificando_persone_ferme and event.text.isdigit():
                     input_numero_persone_ferme += event.text
+                elif modificando_gruppi and event.text.isdigit():
+                    input_numero_gruppi += event.text
 
             if event.type == pygame.KEYDOWN:
                 if chiedendo_password:
@@ -425,6 +594,18 @@ def main():
                         input_numero_persone = input_numero_persone[:-1]
                     continue
 
+                if modificando_corridori:
+                    if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                        if input_numero_corridori.isdigit():
+                            numero_corridori = max(0, min(NUMERO_CORRIDORI_MAX, int(input_numero_corridori)))
+                            sincronizza_persone(corridori, numero_corridori, griglia, fabbrica=crea_corridore)
+                        modificando_corridori = False
+                    elif event.key == pygame.K_ESCAPE:
+                        modificando_corridori = False
+                    elif event.key == pygame.K_BACKSPACE:
+                        input_numero_corridori = input_numero_corridori[:-1]
+                    continue
+
                 if modificando_persone_ferme:
                     if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
                         if input_numero_persone_ferme.isdigit():
@@ -435,6 +616,18 @@ def main():
                         modificando_persone_ferme = False
                     elif event.key == pygame.K_BACKSPACE:
                         input_numero_persone_ferme = input_numero_persone_ferme[:-1]
+                    continue
+
+                if modificando_gruppi:
+                    if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                        if input_numero_gruppi.isdigit():
+                            numero_gruppi = max(0, min(NUMERO_GRUPPI_MAX, int(input_numero_gruppi)))
+                            sincronizza_gruppi(gruppi, numero_gruppi, griglia)
+                        modificando_gruppi = False
+                    elif event.key == pygame.K_ESCAPE:
+                        modificando_gruppi = False
+                    elif event.key == pygame.K_BACKSPACE:
+                        input_numero_gruppi = input_numero_gruppi[:-1]
                     continue
 
                 # Toggle muro singolo alla pressione di W (e inizio del trascinamento)
@@ -461,7 +654,9 @@ def main():
                     if carica_mappa(griglia, FILE_MAPPA):
                         target_pos, percorso = None, []
                         persone = [crea_persona(griglia) for _ in range(numero_persone)]
+                        corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
                         persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
+                        gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
 
                 if event.key == pygame.K_TAB:
                     pannello_aperto = not pannello_aperto
@@ -484,62 +679,127 @@ def main():
         # 3. Movimento
         tempo_di_ricalcolare_robot = contatore_frame % INTERVALLO_RICALCOLO_ROBOT_FRAME == 0
 
+        membri_gruppi_mobili = [m for g in gruppi if g["mobile"] for m in g["membri"]]
+        tutte_mobili = persone + corridori + membri_gruppi_mobili  # persone, corridori e membri dei gruppi si muovono ed evitano gli altri tutti allo stesso modo
+
         robot_bloccato = raggio_sicurezza > 0 and any(
-            math.hypot(robot_x - p["x"], robot_y - p["y"]) < raggio_sicurezza for p in persone
+            math.hypot(robot_x - p["x"], robot_y - p["y"]) < raggio_sicurezza for p in tutte_mobili
         )
 
         celle_persone_ferme = {(pf["r"], pf["c"]) for pf in persone_ferme}
+        celle_persone_ferme |= {(m["r"], m["c"]) for g in gruppi if not g["mobile"] for m in g["membri"]}
 
         if target_pos and not robot_bloccato:
             if not percorso or tempo_di_ricalcolare_robot:
                 percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_persone_ferme)
             meta_nodo = griglia[target_pos[0]][target_pos[1]]
-            robot_x, robot_y, arrivato = passo_movimento(robot_x, robot_y, percorso, VELOCITA_ROBOT * moltiplicatore_velocita, meta_nodo)
+            robot_x, robot_y, arrivato, passo_muro = passo_movimento(robot_x, robot_y, percorso, VELOCITA_ROBOT * moltiplicatore_velocita, meta_nodo, griglia)
+            if passo_muro:
+                percorso = []  # il passo tagliava un muro: ricalcola subito invece di aspettare il prossimo intervallo
             if arrivato:
                 target_pos = None
 
-        # 3b. Movimento persone
+        # 3b. Movimento persone, corridori e membri dei gruppi (stessa logica per tutti, cambia solo la velocita')
         range_evitamento_quad = RANGE_EVITAMENTO_PERSONE ** 2
-        for p in persone:
+        for p in tutte_mobili:
             if p["stato"] == "movimento":
-                piu_vicina, dist_quad_min = None, range_evitamento_quad
-                for p2 in persone:
-                    if p2 is p: continue
-                    dx, dy = p["x"] - p2["x"], p["y"] - p2["y"]
-                    d2 = dx * dx + dy * dy
-                    if d2 < dist_quad_min:
-                        piu_vicina, dist_quad_min = p2, d2
-
-                if piu_vicina is not None:
-                    # troppo vicina a un'altra persona: si allontana un pochino invece di bloccarsi in stallo
-                    p["x"], p["y"] = allontanati(p["x"], p["y"], piu_vicina["x"], piu_vicina["y"], NUDGE_ALLONTANAMENTO, griglia)
-                    p["percorso"] = []  # ripartira' con un percorso fresco dalla nuova posizione
-                    continue
-
                 tempo_di_ricalcolare_questa_persona = (contatore_frame + p["offset_ricalcolo"]) % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
                 if not p["percorso"] or tempo_di_ricalcolare_questa_persona:
                     celle_bloccate = {
                         (int(p2["y"] // DIM_NODO), int(p2["x"] // DIM_NODO))
-                        for p2 in persone if p2 is not p
+                        for p2 in tutte_mobili if p2 is not p
                     }
                     celle_bloccate |= celle_persone_ferme
                     p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"], celle_bloccate=celle_bloccate)
                 nodo_target_p = griglia[p["target"][0]][p["target"][1]]
                 velocita_p = VELOCITA_PERSONA * moltiplicatore_velocita * p["fattore_velocita"]
-                p["x"], p["y"], arrivata = passo_movimento(p["x"], p["y"], p["percorso"], velocita_p, nodo_target_p)
-                if arrivata:
+                non_capofila = "gruppo" in p and not p.get("capofila")
+                if non_capofila:
+                    # niente attrazione/trascinamento verso il leader (si incastrava contro i muri vicino
+                    # alle porte): solo, quando resta indietro oltre la normale distanza di gruppo, piu'
+                    # velocita' in proporzione a quanto e' distante, camminando comunque sul proprio percorso
+                    # valido. Entro la distanza normale nessun boost: cosi' cammina alla stessa identica
+                    # velocita' degli altri finche' resta vicino, invece di avere sempre un moltiplicatore
+                    # leggermente diverso da chiunque altro anche a pochi passi dal leader
+                    leader = p["gruppo"]["membri"][0]
+                    distanza_leader = math.hypot(p["x"] - leader["x"], p["y"] - leader["y"])
+                    if distanza_leader > GRUPPO_DISTANZA_COESIONE_PX:
+                        velocita_p *= min(GRUPPO_FATTORE_RINCORSA_MAX, 1.0 + (distanza_leader - GRUPPO_DISTANZA_COESIONE_PX) / GRUPPO_DISTANZA_COESIONE_PX)
+                p["velocita_attuale"] = velocita_p
+                x_prima, y_prima = p["x"], p["y"]
+                p["x"], p["y"], arrivata, passo_muro = passo_movimento(p["x"], p["y"], p["percorso"], velocita_p, nodo_target_p, griglia)
+                if passo_muro:
+                    p["percorso"] = []  # il passo tagliava un muro: ricalcola subito invece di aspettare il prossimo intervallo
+
+                # scarto continuo e proporzionale per non trapassare le altre persone vicine (niente blocchi a scatti)
+                rep_x, rep_y = repulsione_vicini(p, tutte_mobili, range_evitamento_quad)
+                p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rep_x, rep_y, FORZA_REPULSIONE_PERSONE, griglia)
+
+                if non_capofila:
+                    spostamento = math.hypot(p["x"] - x_prima, p["y"] - y_prima)
+                    p["frame_fermo"] = 0 if spostamento > 0.3 else p.get("frame_fermo", 0) + 1
+                    leader = p["gruppo"]["membri"][0]
+                    distanza_leader = math.hypot(p["x"] - leader["x"], p["y"] - leader["y"])
+                    # va inseguito direttamente il leader se: e' rimasto bloccato a lungo (es. incrocio
+                    # affollato vicino a una porta) oppure si e' allontanato troppo pur muovendosi (il proprio
+                    # A* puo' aver imboccato una rotta completamente diversa dalla sua verso l'obiettivo comune,
+                    # es. aggirando un ostacolo su un lato opposto - la sola rincorsa di velocita' non basta
+                    # perche' corre veloce nella direzione sbagliata)
+                    deve_inseguire_leader = (
+                        distanza_leader > GRUPPO_DISTANZA_MAX_DIVERGENZA_PX
+                        or (p["frame_fermo"] > GRUPPO_FRAME_BLOCCO_SOGLIA and distanza_leader > GRUPPO_DISTANZA_COESIONE_PX)
+                    )
+                    if deve_inseguire_leader and not p.get("inseguendo_leader"):
+                        p["percorso"] = []  # appena entrato in modalita' inseguimento: ricalcola subito verso il leader, non tra 10 frame
+                    if deve_inseguire_leader or p.get("inseguendo_leader"):
+                        if distanza_leader <= GRUPPO_DISTANZA_COESIONE_PX:
+                            # riagganciato: torna a puntare all'obiettivo condiviso del gruppo
+                            p["inseguendo_leader"] = False
+                            p["target"] = p["gruppo"]["target_comune"]
+                            p["percorso"] = []
+                        else:
+                            # il leader e' vivo e si muove: la meta va aggiornata ogni frame alla sua
+                            # posizione attuale, non congelata al punto in cui e' scattato l'inseguimento
+                            # (altrimenti lo si raggiunge ma e' un punto ormai vecchio, ci si "arriva" e ci
+                            # si ferma in attesa mentre il leader vero continua ad allontanarsi)
+                            p["inseguendo_leader"] = True
+                            p["frame_fermo"] = 0
+                            p["target"] = (max(0, min(Y_TOT - 1, int(leader["y"] // DIM_NODO))), max(0, min(X_TOT - 1, int(leader["x"] // DIM_NODO))))
+
+                # mentre insegue il leader "arrivare" al punto attuale non e' un vero arrivo (lui si muove
+                # ancora): non si ferma in attesa, continua a rincorrerlo finche' non lo riprende davvero
+                if arrivata and not (non_capofila and p.get("inseguendo_leader")):
                     p["stato"] = "attesa"
                     p["attesa_timer"] = random.randint(ATTESA_PERSONA_MIN_FRAME, ATTESA_PERSONA_MAX_FRAME)
             elif p["stato"] == "attesa":
+                # anche da ferme mantengono un minimo di distanza dalle altre persone vicine (come se si
+                # fossero fermate a parlare a distanza naturale, non ammassate tutte sullo stesso punto)
+                rep_x, rep_y = repulsione_vicini(p, tutte_mobili, range_evitamento_quad)
+                p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rep_x, rep_y, FORZA_REPULSIONE_PERSONE, griglia)
+
                 p["attesa_timer"] -= 1
                 if p["attesa_timer"] <= 0:
+                    if "gruppo" in p and not p.get("capofila"):
+                        p["attesa_timer"] = random.randint(ATTESA_PERSONA_MIN_FRAME, ATTESA_PERSONA_MAX_FRAME)  # aspetta che il capofila decida la prossima destinazione del gruppo
+                        continue
                     if random.random() < PROBABILITA_PERCORSO_BREVE:
                         nuovo_nodo_target = cella_libera_vicina(griglia, p["x"], p["y"], RAGGIO_PERCORSO_BREVE)
                     else:
                         nuovo_nodo_target = cella_libera_casuale(griglia)
-                    p["target"] = (nuovo_nodo_target.r, nuovo_nodo_target.c)
+                    nuovo_target = (nuovo_nodo_target.r, nuovo_nodo_target.c)
+                    p["target"] = nuovo_target
                     p["percorso"] = []  # forza ricalcolo immediato verso il nuovo target
                     p["stato"] = "movimento"
+                    if p.get("capofila"):
+                        # il capofila decide per tutto il gruppo: interrompe l'attesa/il percorso degli altri
+                        # membri e li reindirizza subito verso la stessa nuova destinazione condivisa
+                        p["gruppo"]["target_comune"] = nuovo_target
+                        for compagno in p["gruppo"]["membri"]:
+                            if compagno is not p:
+                                compagno["target"] = nuovo_target
+                                compagno["percorso"] = []
+                                compagno["stato"] = "movimento"
+                                compagno["inseguendo_leader"] = False
 
         contatore_frame += 1
 
@@ -561,13 +821,20 @@ def main():
             tx, ty = t_s(target_pos[1]*DIM_NODO + DIM_NODO//2, target_pos[0]*DIM_NODO + DIM_NODO//2)
             pygame.draw.circle(screen, ROSSO, (tx, ty), int((DIM_NODO//4) * zoom), 2)
 
-        for p in persone:
+        for p in tutte_mobili:
             px, py = t_s(p["x"], p["y"])
             pygame.draw.circle(screen, ARANCIONE, (px, py), int((DIM_NODO//3) * zoom))
 
         for pf in persone_ferme:
             fx, fy = t_s(pf["x"], pf["y"])
             pygame.draw.circle(screen, ARANCIONE, (fx, fy), int((DIM_NODO//3) * zoom))
+
+        for g in gruppi:
+            if g["mobile"]:
+                continue  # i membri dei gruppi mobili sono gia' disegnati sopra (sono inclusi in tutte_mobili)
+            for m in g["membri"]:
+                mpx, mpy = t_s(m["x"], m["y"])
+                pygame.draw.circle(screen, ARANCIONE, (mpx, mpy), int((DIM_NODO//3) * zoom))
 
         # 5. Overlay richiesta password (salvataggio F5)
         if errore_timer > 0:
@@ -615,8 +882,26 @@ def main():
             numero_txt = font.render(valore_mostrato, True, NERO)
             screen.blit(numero_txt, (numero_box_rect.x + 8, numero_box_rect.y + 4))
 
+            corridori_txt = font.render("Corridori:", True, NERO)
+            screen.blit(corridori_txt, (panel_rect.x + 15, panel_rect.y + 140))
+
+            pygame.draw.rect(screen, BIANCO, numero_corridori_box_rect)
+            pygame.draw.rect(screen, BLU if modificando_corridori else GRIGIO, numero_corridori_box_rect, 2)
+            valore_corridori_mostrato = input_numero_corridori if modificando_corridori else str(numero_corridori)
+            numero_corridori_txt = font.render(valore_corridori_mostrato, True, NERO)
+            screen.blit(numero_corridori_txt, (numero_corridori_box_rect.x + 8, numero_corridori_box_rect.y + 4))
+
+            gruppi_txt = font.render("Gruppi:", True, NERO)
+            screen.blit(gruppi_txt, (panel_rect.x + 15, panel_rect.y + 175))
+
+            pygame.draw.rect(screen, BIANCO, numero_gruppi_box_rect)
+            pygame.draw.rect(screen, BLU if modificando_gruppi else GRIGIO, numero_gruppi_box_rect, 2)
+            valore_gruppi_mostrato = input_numero_gruppi if modificando_gruppi else str(numero_gruppi)
+            numero_gruppi_txt = font.render(valore_gruppi_mostrato, True, NERO)
+            screen.blit(numero_gruppi_txt, (numero_gruppi_box_rect.x + 8, numero_gruppi_box_rect.y + 4))
+
             ferme_txt = font.render("Persone ferme:", True, NERO)
-            screen.blit(ferme_txt, (panel_rect.x + 15, panel_rect.y + 140))
+            screen.blit(ferme_txt, (panel_rect.x + 15, panel_rect.y + 210))
 
             pygame.draw.rect(screen, BIANCO, numero_ferme_box_rect)
             pygame.draw.rect(screen, BLU if modificando_persone_ferme else GRIGIO, numero_ferme_box_rect, 2)
@@ -625,7 +910,7 @@ def main():
             screen.blit(numero_ferme_txt, (numero_ferme_box_rect.x + 8, numero_ferme_box_rect.y + 4))
 
             sicurezza_txt = font.render(f"Zona sicurezza robot: {int(raggio_sicurezza)}px", True, NERO)
-            screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 175))
+            screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 245))
 
             pygame.draw.rect(screen, GRIGIO, slider_sicurezza_rect)
             rel_sic = (raggio_sicurezza - RAGGIO_SICUREZZA_MIN) / (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
