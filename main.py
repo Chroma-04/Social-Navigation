@@ -3,19 +3,32 @@ os.environ["SDL_VIDEO_CENTERED"] = "1"
 import pygame
 import math
 import json
+import random
+import heapq
 
 # --- CONFIGURAZIONE ---
 X_TOT, Y_TOT = 80, 60
 DIM_NODO = 30
 LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
 VELOCITA_ROBOT = 1.5
+VELOCITA_PERSONA = 1.0
+ATTESA_PERSONA_FRAME = 2 * 60  # 2 secondi a 60 FPS
+INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
+INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
 FILE_MAPPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json")
 PASSWORD_SALVATAGGIO = "1258"
+VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 3.0
+NUMERO_PERSONE_DEFAULT = 1
+NUMERO_PERSONE_MAX = 50
+ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
+MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 
 # Colori
 BIANCO, GRIGIO = (255, 255, 255), (210, 210, 210)
 ROSSO, BLU = (255, 0, 0), (0, 100, 255)
+ARANCIONE = (240, 140, 0)
 NERO = (30, 30, 30)
+GRIGIO_SCURO = (90, 90, 90)
 
 class Nodo:
     def __init__(self, r, c):
@@ -41,15 +54,18 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia):
     nodo_inizio = griglia[r_inizio][c_inizio]
     nodo_fine = griglia[r_fine][c_fine]
     
-    for riga in griglia: 
+    for riga in griglia:
         for n in riga: n.reset_calcoli()
 
-    open_list = [nodo_inizio]
+    contatore = 0  # tie-breaker per lo heap (i Nodo non sono confrontabili tra loro)
+    open_heap = [(0, contatore, nodo_inizio)]
+    in_open = {nodo_inizio: 0}  # nodo -> miglior g conosciuto finche' non viene chiuso
     closed_list = set()
 
-    while open_list:
-        attuale = min(open_list, key=lambda n: n.f)
-        open_list.remove(attuale)
+    while open_heap:
+        _, _, attuale = heapq.heappop(open_heap)
+        if attuale in closed_list:
+            continue
         closed_list.add(attuale)
 
         if attuale == nodo_fine:
@@ -66,12 +82,14 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia):
                 if vicino in closed_list or vicino.tipo == "muro": continue
                 dist = math.sqrt((vicino.cx - attuale.cx)**2 + (vicino.cy - attuale.cy)**2)
                 nuovo_g = attuale.g + dist
-                if vicino not in open_list or nuovo_g < vicino.g:
+                if vicino not in in_open or nuovo_g < in_open[vicino]:
                     vicino.g = nuovo_g
                     vicino.h = math.sqrt((vicino.cx - nodo_fine.cx)**2 + (vicino.cy - nodo_fine.cy)**2)
                     vicino.f = vicino.g + vicino.h
                     vicino.genitore = attuale
-                    if vicino not in open_list: open_list.append(vicino)
+                    in_open[vicino] = nuovo_g
+                    contatore += 1
+                    heapq.heappush(open_heap, (vicino.f, contatore, vicino))
     return []
 
 def crea_bordi(griglia):
@@ -79,6 +97,64 @@ def crea_bordi(griglia):
         for c in range(X_TOT):
             if r == 0 or r == Y_TOT - 1 or c == 0 or c == X_TOT - 1:
                 griglia[r][c].tipo = "muro"
+
+def limita_zoom_pan(zoom, offset_x, offset_y, win_w, win_h):
+    """Blocca zoom entro [ZOOM_MIN, ZOOM_MAX] e impedisce di scorrere nel vuoto oltre la mappa."""
+    zoom = max(ZOOM_MIN, min(ZOOM_MAX, zoom))
+    grid_w, grid_h = LARGHEZZA * zoom, ALTEZZA * zoom
+
+    if grid_w <= win_w:
+        offset_x = (win_w - grid_w) / 2
+    else:
+        offset_x = max(win_w - grid_w - MARGINE_PAN, min(MARGINE_PAN, offset_x))
+
+    if grid_h <= win_h:
+        offset_y = (win_h - grid_h) / 2
+    else:
+        offset_y = max(win_h - grid_h - MARGINE_PAN, min(MARGINE_PAN, offset_y))
+
+    return zoom, offset_x, offset_y
+
+def cella_libera_casuale(griglia):
+    libere = [n for riga in griglia for n in riga if n.tipo == "libero"]
+    return random.choice(libere)
+
+def crea_persona(griglia):
+    nodo_iniziale = cella_libera_casuale(griglia)
+    nodo_target = cella_libera_casuale(griglia)
+    return {
+        "x": nodo_iniziale.cx, "y": nodo_iniziale.cy,
+        "target": (nodo_target.r, nodo_target.c),
+        "percorso": [],
+        "stato": "movimento",
+        "attesa_timer": 0,
+    }
+
+def sincronizza_persone(persone, numero, griglia):
+    while len(persone) < numero:
+        persone.append(crea_persona(griglia))
+    while len(persone) > numero:
+        persone.pop()
+
+def passo_movimento(x, y, percorso, velocita, nodo_target):
+    """Avanza di un passo lungo il percorso. Ritorna (nuovo_x, nuovo_y, arrivato_a_destinazione).
+    Consuma i nodi intermedi man mano che vengono raggiunti, cosi' il percorso resta
+    percorribile per piu' frame anche se non viene ricalcolato ad ogni frame."""
+    if len(percorso) > 1:
+        tx, ty = percorso[1].cx, percorso[1].cy
+    elif len(percorso) == 1:
+        tx, ty = nodo_target.cx, nodo_target.cy
+    else:
+        return x, y, False
+
+    dx, dy = tx - x, ty - y
+    dist = math.sqrt(dx**2 + dy**2)
+    if dist > velocita:
+        return x + (dx / dist) * velocita, y + (dy / dist) * velocita, False
+
+    if len(percorso) > 1:
+        percorso.pop(0)
+    return tx, ty, len(percorso) <= 1
 
 def salva_mappa(griglia, path):
     muri = [[n.r, n.c] for riga in griglia for n in riga if n.tipo == "muro"]
@@ -109,7 +185,7 @@ def main():
     win_h = min(ALTEZZA, int(info.current_h * 0.9))
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
     pygame.key.start_text_input()
-    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | F11: Fullscreen | F5: Salva | F9: Carica")
+    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | F11: Fullscreen | F5: Salva | F9: Carica | TAB: Pannello")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 32)
 
@@ -125,11 +201,25 @@ def main():
     offset_x, offset_y = 0, 0
     trascinando = False
     ultima_pos_mouse = (0, 0)
+    ultima_cella_w = None
 
     robot_x = 1 * DIM_NODO + DIM_NODO // 2
     robot_y = 1 * DIM_NODO + DIM_NODO // 2
     target_pos = None
     percorso = []
+
+    # --- PERSONE ---
+    numero_persone = NUMERO_PERSONE_DEFAULT
+    persone = [crea_persona(griglia) for _ in range(numero_persone)]
+
+    # --- PANNELLO TECNICO ---
+    pannello_aperto = False
+    moltiplicatore_velocita = 1.0
+    trascinando_slider = False
+    modificando_persone = False
+    input_numero_persone = ""
+
+    contatore_frame = 0
 
     running = True
     while running:
@@ -139,14 +229,32 @@ def main():
         def t_s(x, y): return int(x * zoom + offset_x), int(y * zoom + offset_y)
         def t_m(sx, sy): return (sx - offset_x) / zoom, (sy - offset_y) / zoom
 
-        # 1. Disegno Scacchiera
-        for riga in griglia:
-            for n in riga:
+        # 1. Disegno Scacchiera (solo le celle visibili nella viewport, per performance)
+        cella_px = DIM_NODO * zoom
+        col_min = max(0, int(-offset_x / cella_px))
+        col_max = min(X_TOT - 1, int((screen.get_width() - offset_x) / cella_px))
+        row_min = max(0, int(-offset_y / cella_px))
+        row_max = min(Y_TOT - 1, int((screen.get_height() - offset_y) / cella_px))
+
+        for r in range(row_min, row_max + 1):
+            for c in range(col_min, col_max + 1):
+                n = griglia[r][c]
+                # Bordo destro/inferiore preso dalla cella successiva: combaciano sempre, senza fessure da arrotondamento
                 sx, sy = t_s(n.x, n.y)
-                dim_z = int(DIM_NODO * zoom)
+                ex, ey = t_s(n.x + DIM_NODO, n.y + DIM_NODO)
+                rect = (sx, sy, ex - sx, ey - sy)
                 if n.tipo == "muro":
-                    pygame.draw.rect(screen, NERO, (sx, sy, dim_z, dim_z))
-                pygame.draw.rect(screen, GRIGIO, (sx, sy, dim_z, dim_z), 1)
+                    pygame.draw.rect(screen, NERO, rect)
+                else:
+                    pygame.draw.rect(screen, GRIGIO, rect, 1)
+
+        # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
+        panel_w, panel_h = 300, 200
+        panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
+        slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
+        numero_box_rect = pygame.Rect(panel_rect.x + 110, panel_rect.y + 100, 60, 30)
+        meno_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 145, 34, 34)
+        piu_rect = pygame.Rect(panel_rect.x + 59, panel_rect.y + 145, 34, 34)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -156,7 +264,24 @@ def main():
                 screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
 
             if event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 4: zoom *= 1.1 # Zoom In
+                if event.button == 1 and modificando_persone and not numero_box_rect.collidepoint(event.pos):
+                    modificando_persone = False  # click fuori dal campo: annulla la modifica
+
+                if event.button == 1 and pannello_aperto and panel_rect.collidepoint(event.pos):
+                    if numero_box_rect.collidepoint(event.pos):
+                        modificando_persone = True
+                        input_numero_persone = str(numero_persone)
+                    elif meno_rect.collidepoint(event.pos):
+                        numero_persone = max(1, numero_persone - 1)
+                        sincronizza_persone(persone, numero_persone, griglia)
+                    elif piu_rect.collidepoint(event.pos):
+                        numero_persone = min(NUMERO_PERSONE_MAX, numero_persone + 1)
+                        sincronizza_persone(persone, numero_persone, griglia)
+                    elif slider_rect.inflate(0, 20).collidepoint(event.pos):
+                        trascinando_slider = True
+                        rel = (event.pos[0] - slider_rect.x) / slider_rect.width
+                        moltiplicatore_velocita = VEL_MULT_MIN + max(0, min(1, rel)) * (VEL_MULT_MAX - VEL_MULT_MIN)
+                elif event.button == 4: zoom *= 1.1 # Zoom In
                 elif event.button == 5: zoom /= 1.1 # Zoom Out
                 elif event.button == 3: # Inizio Pan
                     trascinando = True
@@ -166,29 +291,40 @@ def main():
                     r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
                     if 0 <= r < Y_TOT and 0 <= c < X_TOT:
                         target_pos = (r, c)
+                        percorso = []  # forza ricalcolo immediato verso il nuovo target
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 3: trascinando = False
+                if event.button == 1: trascinando_slider = False
 
             if event.type == pygame.MOUSEMOTION:
+                if trascinando_slider:
+                    rel = (event.pos[0] - slider_rect.x) / slider_rect.width
+                    moltiplicatore_velocita = VEL_MULT_MIN + max(0, min(1, rel)) * (VEL_MULT_MAX - VEL_MULT_MIN)
+                    continue
+
                 # Gestione Panning
                 if trascinando:
                     dx, dy = event.pos[0] - ultima_pos_mouse[0], event.pos[1] - ultima_pos_mouse[1]
                     offset_x += dx
                     offset_y += dy
                     ultima_pos_mouse = event.pos
-                
-                # --- AGGIUNTA: POSIZIONAMENTO MURI CON TASTO 'W' ---
+
+                # --- AGGIUNTA: POSIZIONAMENTO/RIMOZIONE MURI CON TASTO 'W' (trascinando) ---
                 keys = pygame.key.get_pressed()
                 if keys[pygame.K_w]:
                     mx, my = t_m(event.pos[0], event.pos[1])
                     r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
                     # Evitiamo di modificare i bordi esterni e restiamo nei limiti
-                    if 0 < r < Y_TOT - 1 and 0 < c < X_TOT - 1:
-                        griglia[r][c].tipo = "muro"
+                    if 0 < r < Y_TOT - 1 and 0 < c < X_TOT - 1 and (r, c) != ultima_cella_w:
+                        griglia[r][c].tipo = "libero" if griglia[r][c].tipo == "muro" else "muro"
+                        ultima_cella_w = (r, c)
 
-            if event.type == pygame.TEXTINPUT and chiedendo_password:
-                input_password += event.text
+            if event.type == pygame.TEXTINPUT:
+                if chiedendo_password:
+                    input_password += event.text
+                elif modificando_persone and event.text.isdigit():
+                    input_numero_persone += event.text
 
             if event.type == pygame.KEYDOWN:
                 if chiedendo_password:
@@ -206,13 +342,26 @@ def main():
                         input_password = input_password[:-1]
                     continue
 
-                # Toggle muro singolo con pressione singola di W (opzionale)
+                if modificando_persone:
+                    if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                        if input_numero_persone.isdigit():
+                            numero_persone = max(1, min(NUMERO_PERSONE_MAX, int(input_numero_persone)))
+                            sincronizza_persone(persone, numero_persone, griglia)
+                        modificando_persone = False
+                    elif event.key == pygame.K_ESCAPE:
+                        modificando_persone = False
+                    elif event.key == pygame.K_BACKSPACE:
+                        input_numero_persone = input_numero_persone[:-1]
+                    continue
+
+                # Toggle muro singolo alla pressione di W (e inizio del trascinamento)
                 if event.key == pygame.K_w:
                     mpos = pygame.mouse.get_pos()
                     mx, my = t_m(mpos[0], mpos[1])
                     r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
                     if 0 < r < Y_TOT - 1 and 0 < c < X_TOT - 1:
                         griglia[r][c].tipo = "muro" if griglia[r][c].tipo == "libero" else "libero"
+                        ultima_cella_w = (r, c)
 
                 if event.key == pygame.K_r:
                     for riga in griglia:
@@ -228,6 +377,10 @@ def main():
                 if event.key == pygame.K_F9:
                     if carica_mappa(griglia, FILE_MAPPA):
                         target_pos, percorso = None, []
+                        persone = [crea_persona(griglia) for _ in range(numero_persone)]
+
+                if event.key == pygame.K_TAB:
+                    pannello_aperto = not pannello_aperto
 
                 if event.key == pygame.K_F11:
                     fullscreen = not fullscreen
@@ -239,28 +392,42 @@ def main():
                     fullscreen = False
                     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
 
-        # 3. Movimento (Invariato)
+            if event.type == pygame.KEYUP and event.key == pygame.K_w:
+                ultima_cella_w = None
+
+        zoom, offset_x, offset_y = limita_zoom_pan(zoom, offset_x, offset_y, screen.get_width(), screen.get_height())
+
+        # 3. Movimento
+        tempo_di_ricalcolare_robot = contatore_frame % INTERVALLO_RICALCOLO_ROBOT_FRAME == 0
+        tempo_di_ricalcolare_persone = contatore_frame % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
+
         if target_pos:
-            percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos)
-            if len(percorso) > 1:
-                prossimo = percorso[1]
-                tx, ty = prossimo.cx, prossimo.cy
-                dx, dy = tx - robot_x, ty - robot_y
-                dist = math.sqrt(dx**2 + dy**2)
-                if dist > VELOCITA_ROBOT:
-                    robot_x += (dx / dist) * VELOCITA_ROBOT
-                    robot_y += (dy / dist) * VELOCITA_ROBOT
-                else: robot_x, robot_y = tx, ty
-            elif len(percorso) == 1:
-                meta_nodo = griglia[target_pos[0]][target_pos[1]]
-                dx, dy = meta_nodo.cx - robot_x, meta_nodo.cy - robot_y
-                dist = math.sqrt(dx**2 + dy**2)
-                if dist > VELOCITA_ROBOT:
-                    robot_x += (dx / dist) * VELOCITA_ROBOT
-                    robot_y += (dy / dist) * VELOCITA_ROBOT
-                else:
-                    robot_x, robot_y = meta_nodo.cx, meta_nodo.cy
-                    target_pos = None
+            if not percorso or tempo_di_ricalcolare_robot:
+                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos)
+            meta_nodo = griglia[target_pos[0]][target_pos[1]]
+            robot_x, robot_y, arrivato = passo_movimento(robot_x, robot_y, percorso, VELOCITA_ROBOT * moltiplicatore_velocita, meta_nodo)
+            if arrivato:
+                target_pos = None
+
+        # 3b. Movimento persone
+        for p in persone:
+            if p["stato"] == "movimento":
+                if not p["percorso"] or tempo_di_ricalcolare_persone:
+                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"])
+                nodo_target_p = griglia[p["target"][0]][p["target"][1]]
+                p["x"], p["y"], arrivata = passo_movimento(p["x"], p["y"], p["percorso"], VELOCITA_PERSONA * moltiplicatore_velocita, nodo_target_p)
+                if arrivata:
+                    p["stato"] = "attesa"
+                    p["attesa_timer"] = ATTESA_PERSONA_FRAME
+            elif p["stato"] == "attesa":
+                p["attesa_timer"] -= 1
+                if p["attesa_timer"] <= 0:
+                    nuovo_nodo_target = cella_libera_casuale(griglia)
+                    p["target"] = (nuovo_nodo_target.r, nuovo_nodo_target.c)
+                    p["percorso"] = []  # forza ricalcolo immediato verso il nuovo target
+                    p["stato"] = "movimento"
+
+        contatore_frame += 1
 
         # 4. Rendering (Invariato)
         if percorso and len(percorso) > 1:
@@ -272,6 +439,10 @@ def main():
         if target_pos:
             tx, ty = t_s(target_pos[1]*DIM_NODO + DIM_NODO//2, target_pos[0]*DIM_NODO + DIM_NODO//2)
             pygame.draw.circle(screen, ROSSO, (tx, ty), int((DIM_NODO//4) * zoom), 2)
+
+        for p in persone:
+            px, py = t_s(p["x"], p["y"])
+            pygame.draw.circle(screen, ARANCIONE, (px, py), int((DIM_NODO//3) * zoom))
 
         # 5. Overlay richiesta password (salvataggio F5)
         if errore_timer > 0:
@@ -293,6 +464,39 @@ def main():
             if errore_timer > 0:
                 errore_txt = font.render("Password errata", True, ROSSO)
                 screen.blit(errore_txt, (box_x + 15, box_y + 85))
+
+        # 6. Pannello tecnico (TAB per aprire/chiudere)
+        if pannello_aperto:
+            pygame.draw.rect(screen, BIANCO, panel_rect)
+            pygame.draw.rect(screen, NERO, panel_rect, 2)
+
+            titolo = font.render("Pannello tecnico (TAB)", True, NERO)
+            screen.blit(titolo, (panel_rect.x + 15, panel_rect.y + 10))
+
+            vel_txt = font.render(f"Velocita simulazione: {moltiplicatore_velocita:.2f}x", True, NERO)
+            screen.blit(vel_txt, (panel_rect.x + 15, panel_rect.y + 45))
+
+            pygame.draw.rect(screen, GRIGIO, slider_rect)
+            rel = (moltiplicatore_velocita - VEL_MULT_MIN) / (VEL_MULT_MAX - VEL_MULT_MIN)
+            handle_x = slider_rect.x + int(rel * slider_rect.width)
+            pygame.draw.circle(screen, BLU, (handle_x, slider_rect.centery), 9)
+
+            pers_txt = font.render("Persone:", True, NERO)
+            screen.blit(pers_txt, (panel_rect.x + 15, panel_rect.y + 105))
+
+            pygame.draw.rect(screen, BIANCO, numero_box_rect)
+            pygame.draw.rect(screen, BLU if modificando_persone else GRIGIO, numero_box_rect, 2)
+            valore_mostrato = input_numero_persone if modificando_persone else str(numero_persone)
+            numero_txt = font.render(valore_mostrato, True, NERO)
+            screen.blit(numero_txt, (numero_box_rect.x + 8, numero_box_rect.y + 4))
+
+            pygame.draw.rect(screen, GRIGIO_SCURO, meno_rect)
+            meno_txt = font.render("-", True, BIANCO)
+            screen.blit(meno_txt, (meno_rect.centerx - 4, meno_rect.centery - 12))
+
+            pygame.draw.rect(screen, GRIGIO_SCURO, piu_rect)
+            piu_txt = font.render("+", True, BIANCO)
+            screen.blit(piu_txt, (piu_rect.centerx - 6, piu_rect.centery - 12))
 
         pygame.display.flip()
         clock.tick(60)
