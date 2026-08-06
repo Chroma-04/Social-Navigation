@@ -12,7 +12,10 @@ DIM_NODO = 30
 LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
 VELOCITA_ROBOT = 1.5
 VELOCITA_PERSONA = 1.0
-ATTESA_PERSONA_FRAME = 2 * 60  # 2 secondi a 60 FPS
+ATTESA_PERSONA_MIN_FRAME = 1 * 60  # attesa minima dopo l'arrivo, in frame (60 FPS)
+ATTESA_PERSONA_MAX_FRAME = 4 * 60  # attesa massima dopo l'arrivo, in frame
+PROBABILITA_PERCORSO_BREVE = 0.35  # probabilita' che la prossima destinazione sia vicina invece che casuale ovunque
+RAGGIO_PERCORSO_BREVE = DIM_NODO * 6  # distanza massima (in pixel) per un "percorso breve"
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
 FILE_MAPPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json")
@@ -23,8 +26,10 @@ NUMERO_PERSONE_MAX = 50
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
-RAGGIO_SICUREZZA_DEFAULT = DIM_NODO * 2
+RAGGIO_SICUREZZA_DEFAULT = 20
 ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
+VARIAZIONE_VELOCITA_PERSONA = 0.15  # +-15% di velocita' individuale casuale
+RUMORE_PERCORSO_PERSONA = 15  # quanto i percorsi delle persone si discostano dall'ottimo matematico (0 = disattivato)
 
 # Colori
 BIANCO, GRIGIO = (255, 255, 255), (210, 210, 210)
@@ -47,7 +52,7 @@ class Nodo:
         self.g = self.h = self.f = 0
         self.genitore = None
 
-def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia):
+def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None):
     c_inizio = int(inizio_pos_pixel[0] // DIM_NODO)
     r_inizio = int(inizio_pos_pixel[1] // DIM_NODO)
     r_fine, c_fine = fine_pos_griglia
@@ -84,6 +89,11 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia):
                 vicino = griglia[r][c]
                 if vicino in closed_list or vicino.tipo == "muro": continue
                 dist = math.sqrt((vicino.cx - attuale.cx)**2 + (vicino.cy - attuale.cy)**2)
+                if rumore_seed is not None:
+                    # rumore deterministico per cella+persona: la stessa persona rifa' sempre
+                    # la stessa scelta di "corsia" ricalcolando, invece di zigzagare a caso
+                    perturbazione = math.sin(vicino.r * 12.9898 + vicino.c * 78.233 + rumore_seed) * RUMORE_PERCORSO_PERSONA
+                    dist = max(1.0, dist + perturbazione)
                 nuovo_g = attuale.g + dist
                 if vicino not in in_open or nuovo_g < in_open[vicino]:
                     vicino.g = nuovo_g
@@ -122,6 +132,13 @@ def cella_libera_casuale(griglia):
     libere = [n for riga in griglia for n in riga if n.tipo == "libero"]
     return random.choice(libere)
 
+def cella_libera_vicina(griglia, x, y, raggio):
+    """Cella libera entro un certo raggio da (x, y), per generare percorsi brevi. Se non ne trova, ripiega su una casuale."""
+    vicine = [n for riga in griglia for n in riga if n.tipo == "libero" and math.hypot(n.cx - x, n.cy - y) <= raggio]
+    if vicine:
+        return random.choice(vicine)
+    return cella_libera_casuale(griglia)
+
 def crea_persona(griglia):
     nodo_iniziale = cella_libera_casuale(griglia)
     nodo_target = cella_libera_casuale(griglia)
@@ -131,6 +148,8 @@ def crea_persona(griglia):
         "percorso": [],
         "stato": "movimento",
         "attesa_timer": 0,
+        "rumore_seed": random.uniform(0, 1000),
+        "fattore_velocita": random.uniform(1 - VARIAZIONE_VELOCITA_PERSONA, 1 + VARIAZIONE_VELOCITA_PERSONA),
     }
 
 def sincronizza_persone(persone, numero, griglia):
@@ -425,16 +444,20 @@ def main():
         for p in persone:
             if p["stato"] == "movimento":
                 if not p["percorso"] or tempo_di_ricalcolare_persone:
-                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"])
+                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"])
                 nodo_target_p = griglia[p["target"][0]][p["target"][1]]
-                p["x"], p["y"], arrivata = passo_movimento(p["x"], p["y"], p["percorso"], VELOCITA_PERSONA * moltiplicatore_velocita, nodo_target_p)
+                velocita_p = VELOCITA_PERSONA * moltiplicatore_velocita * p["fattore_velocita"]
+                p["x"], p["y"], arrivata = passo_movimento(p["x"], p["y"], p["percorso"], velocita_p, nodo_target_p)
                 if arrivata:
                     p["stato"] = "attesa"
-                    p["attesa_timer"] = ATTESA_PERSONA_FRAME
+                    p["attesa_timer"] = random.randint(ATTESA_PERSONA_MIN_FRAME, ATTESA_PERSONA_MAX_FRAME)
             elif p["stato"] == "attesa":
                 p["attesa_timer"] -= 1
                 if p["attesa_timer"] <= 0:
-                    nuovo_nodo_target = cella_libera_casuale(griglia)
+                    if random.random() < PROBABILITA_PERCORSO_BREVE:
+                        nuovo_nodo_target = cella_libera_vicina(griglia, p["x"], p["y"], RAGGIO_PERCORSO_BREVE)
+                    else:
+                        nuovo_nodo_target = cella_libera_casuale(griglia)
                     p["target"] = (nuovo_nodo_target.r, nuovo_nodo_target.c)
                     p["percorso"] = []  # forza ricalcolo immediato verso il nuovo target
                     p["stato"] = "movimento"
