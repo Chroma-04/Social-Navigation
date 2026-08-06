@@ -16,13 +16,17 @@ ATTESA_PERSONA_MIN_FRAME = 1 * 60  # attesa minima dopo l'arrivo, in frame (60 F
 ATTESA_PERSONA_MAX_FRAME = 4 * 60  # attesa massima dopo l'arrivo, in frame
 PROBABILITA_PERCORSO_BREVE = 0.35  # probabilita' che la prossima destinazione sia vicina invece che casuale ovunque
 RAGGIO_PERCORSO_BREVE = DIM_NODO * 6  # distanza massima (in pixel) per un "percorso breve"
+RANGE_EVITAMENTO_PERSONE = 15  # px: sotto questa distanza da un'altra persona ci si ferma
+NUDGE_ALLONTANAMENTO = 2  # px per frame di allontanamento quando bloccati, per rompere lo stallo
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
 FILE_MAPPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json")
 PASSWORD_SALVATAGGIO = "1258"
 VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 3.0
-NUMERO_PERSONE_DEFAULT = 1
+NUMERO_PERSONE_DEFAULT = 0
 NUMERO_PERSONE_MAX = 50
+NUMERO_PERSONE_FERME_DEFAULT = 0
+NUMERO_PERSONE_FERME_MAX = 50
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
@@ -52,7 +56,7 @@ class Nodo:
         self.g = self.h = self.f = 0
         self.genitore = None
 
-def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None):
+def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None, celle_bloccate=None):
     c_inizio = int(inizio_pos_pixel[0] // DIM_NODO)
     r_inizio = int(inizio_pos_pixel[1] // DIM_NODO)
     r_fine, c_fine = fine_pos_griglia
@@ -88,6 +92,7 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
             if 0 <= r < Y_TOT and 0 <= c < X_TOT:
                 vicino = griglia[r][c]
                 if vicino in closed_list or vicino.tipo == "muro": continue
+                if celle_bloccate and (r, c) in celle_bloccate: continue
                 dist = math.sqrt((vicino.cx - attuale.cx)**2 + (vicino.cy - attuale.cy)**2)
                 if rumore_seed is not None:
                     # rumore deterministico per cella+persona: la stessa persona rifa' sempre
@@ -150,6 +155,7 @@ def crea_persona(griglia):
         "attesa_timer": 0,
         "rumore_seed": random.uniform(0, 1000),
         "fattore_velocita": random.uniform(1 - VARIAZIONE_VELOCITA_PERSONA, 1 + VARIAZIONE_VELOCITA_PERSONA),
+        "offset_ricalcolo": random.randint(0, INTERVALLO_RICALCOLO_PERSONE_FRAME - 1),
     }
 
 def sincronizza_persone(persone, numero, griglia):
@@ -157,6 +163,30 @@ def sincronizza_persone(persone, numero, griglia):
         persone.append(crea_persona(griglia))
     while len(persone) > numero:
         persone.pop()
+
+def crea_persona_ferma(griglia):
+    nodo = cella_libera_casuale(griglia)
+    return {"x": nodo.cx, "y": nodo.cy, "r": nodo.r, "c": nodo.c}
+
+def sincronizza_persone_ferme(persone_ferme, numero, griglia):
+    while len(persone_ferme) < numero:
+        persone_ferme.append(crea_persona_ferma(griglia))
+    while len(persone_ferme) > numero:
+        persone_ferme.pop()
+
+def allontanati(x, y, altra_x, altra_y, distanza, griglia):
+    """Sposta (x, y) di un piccolo passo lontano da (altra_x, altra_y), senza attraversare muri."""
+    dx, dy = x - altra_x, y - altra_y
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        angolo = random.uniform(0, 2 * math.pi)
+        dx, dy = math.cos(angolo), math.sin(angolo)
+        dist = 1
+    nx, ny = x + (dx / dist) * distanza, y + (dy / dist) * distanza
+    r, c = int(ny // DIM_NODO), int(nx // DIM_NODO)
+    if 0 <= r < Y_TOT and 0 <= c < X_TOT and griglia[r][c].tipo != "muro":
+        return nx, ny
+    return x, y
 
 def passo_movimento(x, y, percorso, velocita, nodo_target):
     """Avanza di un passo lungo il percorso. Ritorna (nuovo_x, nuovo_y, arrivato_a_destinazione).
@@ -234,12 +264,18 @@ def main():
     numero_persone = NUMERO_PERSONE_DEFAULT
     persone = [crea_persona(griglia) for _ in range(numero_persone)]
 
+    # --- PERSONE FERME (ostacoli statici) ---
+    numero_persone_ferme = NUMERO_PERSONE_FERME_DEFAULT
+    persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
+
     # --- PANNELLO TECNICO ---
     pannello_aperto = False
     moltiplicatore_velocita = 1.0
     trascinando_slider = False
     modificando_persone = False
     input_numero_persone = ""
+    modificando_persone_ferme = False
+    input_numero_persone_ferme = ""
     raggio_sicurezza = RAGGIO_SICUREZZA_DEFAULT
     trascinando_raggio = False
 
@@ -273,11 +309,12 @@ def main():
                     pygame.draw.rect(screen, GRIGIO, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 300, 225
+        panel_w, panel_h = 300, 260
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
-        numero_box_rect = pygame.Rect(panel_rect.x + 110, panel_rect.y + 100, 60, 30)
-        slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 195, panel_w - 30, 8)
+        numero_box_rect = pygame.Rect(panel_rect.x + 150, panel_rect.y + 100, 60, 30)
+        numero_ferme_box_rect = pygame.Rect(panel_rect.x + 150, panel_rect.y + 135, 60, 30)
+        slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 205, panel_w - 30, 8)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -289,11 +326,16 @@ def main():
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1 and modificando_persone and not numero_box_rect.collidepoint(event.pos):
                     modificando_persone = False  # click fuori dal campo: annulla la modifica
+                if event.button == 1 and modificando_persone_ferme and not numero_ferme_box_rect.collidepoint(event.pos):
+                    modificando_persone_ferme = False
 
                 if event.button == 1 and pannello_aperto and panel_rect.collidepoint(event.pos):
                     if numero_box_rect.collidepoint(event.pos):
                         modificando_persone = True
                         input_numero_persone = str(numero_persone)
+                    elif numero_ferme_box_rect.collidepoint(event.pos):
+                        modificando_persone_ferme = True
+                        input_numero_persone_ferme = str(numero_persone_ferme)
                     elif slider_rect.inflate(0, 20).collidepoint(event.pos):
                         trascinando_slider = True
                         rel = (event.pos[0] - slider_rect.x) / slider_rect.width
@@ -352,6 +394,8 @@ def main():
                     input_password += event.text
                 elif modificando_persone and event.text.isdigit():
                     input_numero_persone += event.text
+                elif modificando_persone_ferme and event.text.isdigit():
+                    input_numero_persone_ferme += event.text
 
             if event.type == pygame.KEYDOWN:
                 if chiedendo_password:
@@ -372,13 +416,25 @@ def main():
                 if modificando_persone:
                     if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
                         if input_numero_persone.isdigit():
-                            numero_persone = max(1, min(NUMERO_PERSONE_MAX, int(input_numero_persone)))
+                            numero_persone = max(0, min(NUMERO_PERSONE_MAX, int(input_numero_persone)))
                             sincronizza_persone(persone, numero_persone, griglia)
                         modificando_persone = False
                     elif event.key == pygame.K_ESCAPE:
                         modificando_persone = False
                     elif event.key == pygame.K_BACKSPACE:
                         input_numero_persone = input_numero_persone[:-1]
+                    continue
+
+                if modificando_persone_ferme:
+                    if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                        if input_numero_persone_ferme.isdigit():
+                            numero_persone_ferme = max(0, min(NUMERO_PERSONE_FERME_MAX, int(input_numero_persone_ferme)))
+                            sincronizza_persone_ferme(persone_ferme, numero_persone_ferme, griglia)
+                        modificando_persone_ferme = False
+                    elif event.key == pygame.K_ESCAPE:
+                        modificando_persone_ferme = False
+                    elif event.key == pygame.K_BACKSPACE:
+                        input_numero_persone_ferme = input_numero_persone_ferme[:-1]
                     continue
 
                 # Toggle muro singolo alla pressione di W (e inizio del trascinamento)
@@ -405,6 +461,7 @@ def main():
                     if carica_mappa(griglia, FILE_MAPPA):
                         target_pos, percorso = None, []
                         persone = [crea_persona(griglia) for _ in range(numero_persone)]
+                        persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
 
                 if event.key == pygame.K_TAB:
                     pannello_aperto = not pannello_aperto
@@ -426,25 +483,47 @@ def main():
 
         # 3. Movimento
         tempo_di_ricalcolare_robot = contatore_frame % INTERVALLO_RICALCOLO_ROBOT_FRAME == 0
-        tempo_di_ricalcolare_persone = contatore_frame % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
 
         robot_bloccato = raggio_sicurezza > 0 and any(
             math.hypot(robot_x - p["x"], robot_y - p["y"]) < raggio_sicurezza for p in persone
         )
 
+        celle_persone_ferme = {(pf["r"], pf["c"]) for pf in persone_ferme}
+
         if target_pos and not robot_bloccato:
             if not percorso or tempo_di_ricalcolare_robot:
-                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos)
+                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_persone_ferme)
             meta_nodo = griglia[target_pos[0]][target_pos[1]]
             robot_x, robot_y, arrivato = passo_movimento(robot_x, robot_y, percorso, VELOCITA_ROBOT * moltiplicatore_velocita, meta_nodo)
             if arrivato:
                 target_pos = None
 
         # 3b. Movimento persone
+        range_evitamento_quad = RANGE_EVITAMENTO_PERSONE ** 2
         for p in persone:
             if p["stato"] == "movimento":
-                if not p["percorso"] or tempo_di_ricalcolare_persone:
-                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"])
+                piu_vicina, dist_quad_min = None, range_evitamento_quad
+                for p2 in persone:
+                    if p2 is p: continue
+                    dx, dy = p["x"] - p2["x"], p["y"] - p2["y"]
+                    d2 = dx * dx + dy * dy
+                    if d2 < dist_quad_min:
+                        piu_vicina, dist_quad_min = p2, d2
+
+                if piu_vicina is not None:
+                    # troppo vicina a un'altra persona: si allontana un pochino invece di bloccarsi in stallo
+                    p["x"], p["y"] = allontanati(p["x"], p["y"], piu_vicina["x"], piu_vicina["y"], NUDGE_ALLONTANAMENTO, griglia)
+                    p["percorso"] = []  # ripartira' con un percorso fresco dalla nuova posizione
+                    continue
+
+                tempo_di_ricalcolare_questa_persona = (contatore_frame + p["offset_ricalcolo"]) % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
+                if not p["percorso"] or tempo_di_ricalcolare_questa_persona:
+                    celle_bloccate = {
+                        (int(p2["y"] // DIM_NODO), int(p2["x"] // DIM_NODO))
+                        for p2 in persone if p2 is not p
+                    }
+                    celle_bloccate |= celle_persone_ferme
+                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"], celle_bloccate=celle_bloccate)
                 nodo_target_p = griglia[p["target"][0]][p["target"][1]]
                 velocita_p = VELOCITA_PERSONA * moltiplicatore_velocita * p["fattore_velocita"]
                 p["x"], p["y"], arrivata = passo_movimento(p["x"], p["y"], p["percorso"], velocita_p, nodo_target_p)
@@ -485,6 +564,10 @@ def main():
         for p in persone:
             px, py = t_s(p["x"], p["y"])
             pygame.draw.circle(screen, ARANCIONE, (px, py), int((DIM_NODO//3) * zoom))
+
+        for pf in persone_ferme:
+            fx, fy = t_s(pf["x"], pf["y"])
+            pygame.draw.circle(screen, ARANCIONE, (fx, fy), int((DIM_NODO//3) * zoom))
 
         # 5. Overlay richiesta password (salvataggio F5)
         if errore_timer > 0:
@@ -532,8 +615,17 @@ def main():
             numero_txt = font.render(valore_mostrato, True, NERO)
             screen.blit(numero_txt, (numero_box_rect.x + 8, numero_box_rect.y + 4))
 
+            ferme_txt = font.render("Persone ferme:", True, NERO)
+            screen.blit(ferme_txt, (panel_rect.x + 15, panel_rect.y + 140))
+
+            pygame.draw.rect(screen, BIANCO, numero_ferme_box_rect)
+            pygame.draw.rect(screen, BLU if modificando_persone_ferme else GRIGIO, numero_ferme_box_rect, 2)
+            valore_ferme_mostrato = input_numero_persone_ferme if modificando_persone_ferme else str(numero_persone_ferme)
+            numero_ferme_txt = font.render(valore_ferme_mostrato, True, NERO)
+            screen.blit(numero_ferme_txt, (numero_ferme_box_rect.x + 8, numero_ferme_box_rect.y + 4))
+
             sicurezza_txt = font.render(f"Zona sicurezza robot: {int(raggio_sicurezza)}px", True, NERO)
-            screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 165))
+            screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 175))
 
             pygame.draw.rect(screen, GRIGIO, slider_sicurezza_rect)
             rel_sic = (raggio_sicurezza - RAGGIO_SICUREZZA_MIN) / (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
