@@ -22,6 +22,9 @@ NUMERO_PERSONE_DEFAULT = 1
 NUMERO_PERSONE_MAX = 50
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
+RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
+RAGGIO_SICUREZZA_DEFAULT = DIM_NODO * 2
+ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
 
 # Colori
 BIANCO, GRIGIO = (255, 255, 255), (210, 210, 210)
@@ -218,6 +221,8 @@ def main():
     trascinando_slider = False
     modificando_persone = False
     input_numero_persone = ""
+    raggio_sicurezza = RAGGIO_SICUREZZA_DEFAULT
+    trascinando_raggio = False
 
     contatore_frame = 0
 
@@ -249,12 +254,11 @@ def main():
                     pygame.draw.rect(screen, GRIGIO, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 300, 200
+        panel_w, panel_h = 300, 225
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
         numero_box_rect = pygame.Rect(panel_rect.x + 110, panel_rect.y + 100, 60, 30)
-        meno_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 145, 34, 34)
-        piu_rect = pygame.Rect(panel_rect.x + 59, panel_rect.y + 145, 34, 34)
+        slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 195, panel_w - 30, 8)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -271,16 +275,14 @@ def main():
                     if numero_box_rect.collidepoint(event.pos):
                         modificando_persone = True
                         input_numero_persone = str(numero_persone)
-                    elif meno_rect.collidepoint(event.pos):
-                        numero_persone = max(1, numero_persone - 1)
-                        sincronizza_persone(persone, numero_persone, griglia)
-                    elif piu_rect.collidepoint(event.pos):
-                        numero_persone = min(NUMERO_PERSONE_MAX, numero_persone + 1)
-                        sincronizza_persone(persone, numero_persone, griglia)
                     elif slider_rect.inflate(0, 20).collidepoint(event.pos):
                         trascinando_slider = True
                         rel = (event.pos[0] - slider_rect.x) / slider_rect.width
                         moltiplicatore_velocita = VEL_MULT_MIN + max(0, min(1, rel)) * (VEL_MULT_MAX - VEL_MULT_MIN)
+                    elif slider_sicurezza_rect.inflate(0, 20).collidepoint(event.pos):
+                        trascinando_raggio = True
+                        rel = (event.pos[0] - slider_sicurezza_rect.x) / slider_sicurezza_rect.width
+                        raggio_sicurezza = RAGGIO_SICUREZZA_MIN + max(0, min(1, rel)) * (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
                 elif event.button == 4: zoom *= 1.1 # Zoom In
                 elif event.button == 5: zoom /= 1.1 # Zoom Out
                 elif event.button == 3: # Inizio Pan
@@ -295,12 +297,18 @@ def main():
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 3: trascinando = False
-                if event.button == 1: trascinando_slider = False
+                if event.button == 1:
+                    trascinando_slider = False
+                    trascinando_raggio = False
 
             if event.type == pygame.MOUSEMOTION:
                 if trascinando_slider:
                     rel = (event.pos[0] - slider_rect.x) / slider_rect.width
                     moltiplicatore_velocita = VEL_MULT_MIN + max(0, min(1, rel)) * (VEL_MULT_MAX - VEL_MULT_MIN)
+                    continue
+                if trascinando_raggio:
+                    rel = (event.pos[0] - slider_sicurezza_rect.x) / slider_sicurezza_rect.width
+                    raggio_sicurezza = RAGGIO_SICUREZZA_MIN + max(0, min(1, rel)) * (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
                     continue
 
                 # Gestione Panning
@@ -401,7 +409,11 @@ def main():
         tempo_di_ricalcolare_robot = contatore_frame % INTERVALLO_RICALCOLO_ROBOT_FRAME == 0
         tempo_di_ricalcolare_persone = contatore_frame % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
 
-        if target_pos:
+        robot_bloccato = raggio_sicurezza > 0 and any(
+            math.hypot(robot_x - p["x"], robot_y - p["y"]) < raggio_sicurezza for p in persone
+        )
+
+        if target_pos and not robot_bloccato:
             if not percorso or tempo_di_ricalcolare_robot:
                 percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos)
             meta_nodo = griglia[target_pos[0]][target_pos[1]]
@@ -435,6 +447,13 @@ def main():
             pygame.draw.lines(screen, ROSSO, False, punti, 2)
 
         rx, ry = t_s(robot_x, robot_y)
+
+        if raggio_sicurezza > 0:
+            raggio_px = max(1, int(raggio_sicurezza * zoom))
+            zona_surf = pygame.Surface((raggio_px * 2, raggio_px * 2), pygame.SRCALPHA)
+            pygame.draw.circle(zona_surf, (255, 0, 0, ALPHA_ZONA_SICUREZZA), (raggio_px, raggio_px), raggio_px)
+            screen.blit(zona_surf, (rx - raggio_px, ry - raggio_px))
+
         pygame.draw.circle(screen, BLU, (rx, ry), int((DIM_NODO//3) * zoom))
         if target_pos:
             tx, ty = t_s(target_pos[1]*DIM_NODO + DIM_NODO//2, target_pos[0]*DIM_NODO + DIM_NODO//2)
@@ -490,13 +509,13 @@ def main():
             numero_txt = font.render(valore_mostrato, True, NERO)
             screen.blit(numero_txt, (numero_box_rect.x + 8, numero_box_rect.y + 4))
 
-            pygame.draw.rect(screen, GRIGIO_SCURO, meno_rect)
-            meno_txt = font.render("-", True, BIANCO)
-            screen.blit(meno_txt, (meno_rect.centerx - 4, meno_rect.centery - 12))
+            sicurezza_txt = font.render(f"Zona sicurezza robot: {int(raggio_sicurezza)}px", True, NERO)
+            screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 165))
 
-            pygame.draw.rect(screen, GRIGIO_SCURO, piu_rect)
-            piu_txt = font.render("+", True, BIANCO)
-            screen.blit(piu_txt, (piu_rect.centerx - 6, piu_rect.centery - 12))
+            pygame.draw.rect(screen, GRIGIO, slider_sicurezza_rect)
+            rel_sic = (raggio_sicurezza - RAGGIO_SICUREZZA_MIN) / (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
+            handle_sic_x = slider_sicurezza_rect.x + int(rel_sic * slider_sicurezza_rect.width)
+            pygame.draw.circle(screen, ROSSO, (handle_sic_x, slider_sicurezza_rect.centery), 9)
 
         pygame.display.flip()
         clock.tick(60)
