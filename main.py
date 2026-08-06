@@ -49,6 +49,9 @@ MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
 RAGGIO_SICUREZZA_DEFAULT = 20
 ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
+RAGGIO_ROBOT_PX = DIM_NODO // 3  # raggio "fisico" del robot (lo stesso con cui viene disegnato)
+RANGE_EVITAMENTO_ROBOT = RAGGIO_ROBOT_PX + DIM_NODO // 3  # raggio robot + raggio persona: i corpi non si sovrappongono mai, indipendentemente dalla zona di sicurezza (che puo' essere piu' piccola, piu' grande o disattivata)
+FORZA_REPULSIONE_ROBOT = 1.3  # px/frame massimi di spinta continua lontano dal robot (a distanza 0)
 FATTORE_VELOCITA_MEDIA = 1.0    # media della gaussiana (1.0 = velocita' base)
 FATTORE_VELOCITA_DEV_STD = 0.25  # deviazione standard: la maggior parte cammina, code = passeggiano/corrono
 FATTORE_VELOCITA_MIN, FATTORE_VELOCITA_MAX = 0.4, 2.5  # limiti per evitare fermi o assurdamente veloci
@@ -304,6 +307,18 @@ def repulsione_vicini(entita, vicini, range_evitamento_quad):
             rep_x += (dx / d) * peso
             rep_y += (dy / d) * peso
     return rep_x, rep_y
+
+def repulsione_punto(entita, px, py, raggio):
+    """Come repulsione_vicini ma da un singolo punto fisso (es. il corpo del robot) invece che da una
+    lista di entita': stessa logica di spinta proporzionale alla distanza, senza pesi di priorita'."""
+    dx, dy = entita["x"] - px, entita["y"] - py
+    d2 = dx * dx + dy * dy
+    raggio_quad = raggio * raggio
+    if 0 < d2 < raggio_quad:
+        d = math.sqrt(d2)
+        peso = (raggio - d) / raggio
+        return (dx / d) * peso, (dy / d) * peso
+    return 0.0, 0.0
 
 def sposta_con_vettore(x, y, vx, vy, forza, griglia):
     """Applica lo spostamento (vx, vy) * forza (repulsione o attrazione), senza attraversare muri."""
@@ -710,6 +725,7 @@ def main():
                         for p2 in tutte_mobili if p2 is not p
                     }
                     celle_bloccate |= celle_persone_ferme
+                    celle_bloccate.add((int(robot_y // DIM_NODO), int(robot_x // DIM_NODO)))
                     p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"], celle_bloccate=celle_bloccate)
                 nodo_target_p = griglia[p["target"][0]][p["target"][1]]
                 velocita_p = VELOCITA_PERSONA * moltiplicatore_velocita * p["fattore_velocita"]
@@ -734,6 +750,11 @@ def main():
                 # scarto continuo e proporzionale per non trapassare le altre persone vicine (niente blocchi a scatti)
                 rep_x, rep_y = repulsione_vicini(p, tutte_mobili, range_evitamento_quad)
                 p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rep_x, rep_y, FORZA_REPULSIONE_PERSONE, griglia)
+
+                # il robot e' un ostacolo fisico: le persone possono avvicinarsi ed entrare nella sua zona di
+                # sicurezza (che riguarda solo il robot, non loro), ma non compenetrare il suo corpo - lo aggirano
+                rrep_x, rrep_y = repulsione_punto(p, robot_x, robot_y, RANGE_EVITAMENTO_ROBOT)
+                p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rrep_x, rrep_y, FORZA_REPULSIONE_ROBOT, griglia)
 
                 if non_capofila:
                     spostamento = math.hypot(p["x"] - x_prima, p["y"] - y_prima)
@@ -777,6 +798,9 @@ def main():
                 rep_x, rep_y = repulsione_vicini(p, tutte_mobili, range_evitamento_quad)
                 p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rep_x, rep_y, FORZA_REPULSIONE_PERSONE, griglia)
 
+                rrep_x, rrep_y = repulsione_punto(p, robot_x, robot_y, RANGE_EVITAMENTO_ROBOT)
+                p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rrep_x, rrep_y, FORZA_REPULSIONE_ROBOT, griglia)
+
                 p["attesa_timer"] -= 1
                 if p["attesa_timer"] <= 0:
                     if "gruppo" in p and not p.get("capofila"):
@@ -816,7 +840,7 @@ def main():
             pygame.draw.circle(zona_surf, (255, 0, 0, ALPHA_ZONA_SICUREZZA), (raggio_px, raggio_px), raggio_px)
             screen.blit(zona_surf, (rx - raggio_px, ry - raggio_px))
 
-        pygame.draw.circle(screen, BLU, (rx, ry), int((DIM_NODO//3) * zoom))
+        pygame.draw.circle(screen, BLU, (rx, ry), int(RAGGIO_ROBOT_PX * zoom))
         if target_pos:
             tx, ty = t_s(target_pos[1]*DIM_NODO + DIM_NODO//2, target_pos[0]*DIM_NODO + DIM_NODO//2)
             pygame.draw.circle(screen, ROSSO, (tx, ty), int((DIM_NODO//4) * zoom), 2)
