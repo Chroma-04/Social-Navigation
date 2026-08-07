@@ -1,0 +1,1 @@
+{"numero_persone": 90, "numero_corridori": 90, "numero_persone_ferme": 120, "numero_gruppi": 50, "moltiplicatore_velocita": 1.0, "raggio_sicurezza": 14, "raggio_robot": 7, "raggio_lidar": 120, "raggio_persona": 8, "definizione_ellissoidi": 1, "sicurezza_attiva": true, "lidar_attivo": true, "ellissoidi_attivi": true}

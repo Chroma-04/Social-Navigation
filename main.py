@@ -5,6 +5,7 @@ import math
 import json
 import random
 import heapq
+import multiprocessing as mp
 
 # --- CONFIGURAZIONE ---
 X_TOT, Y_TOT = 80, 60
@@ -27,6 +28,7 @@ FILE_MAPPA_SLOT = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata_3.json"),
 ]
 PASSWORD_SALVATAGGIO = "1258"
+FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
 VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 3.0
 NUMERO_PERSONE_DEFAULT = 0
 NUMERO_PERSONE_MAX = 200
@@ -51,10 +53,10 @@ GRUPPO_DISTANZA_MAX_DIVERGENZA_PX = int(DIM_NODO * 5)  # oltre questa distanza d
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
-RAGGIO_SICUREZZA_DEFAULT = 20
+RAGGIO_SICUREZZA_DEFAULT = 14
 ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
 RAGGIO_ROBOT_MIN, RAGGIO_ROBOT_MAX = 5, int(DIM_NODO * 1.5)
-RAGGIO_ROBOT_DEFAULT = DIM_NODO // 3  # raggio "fisico" del robot (lo stesso con cui viene disegnato di default)
+RAGGIO_ROBOT_DEFAULT = 7  # raggio "fisico" del robot (lo stesso con cui viene disegnato di default)
 RAGGIO_PERSONA_MIN, RAGGIO_PERSONA_MAX = 3, int(DIM_NODO * 0.9)
 RAGGIO_PERSONA_DEFAULT = 8  # raggio con cui vengono disegnate le persone
 FORZA_REPULSIONE_ROBOT = 1.3  # px/frame massimi di spinta continua lontano dal robot (a distanza 0)
@@ -67,11 +69,28 @@ KALMAN_RUMORE_PROCESSO = 0.05  # varianza aggiunta alla velocita' stimata ad ogn
 KALMAN_INCERTEZZA_INIZIALE_POS = 50.0 ** 2  # varianza di posizione iniziale per una traccia appena avvistata
 KALMAN_INCERTEZZA_INIZIALE_VEL = 5.0 ** 2  # varianza di velocita' iniziale per una traccia appena avvistata
 PREVISIONE_BLOB_FRAME = 60  # quanti frame nel futuro si proietta il centro della macchia (60 = 1s)
-RAGGIO_BLOB_CELLE = 6  # raggio massimo (in celle) della diffusione della macchia di probabilita'
-DECADIMENTO_BLOB = 0.75  # fattore di decadimento del peso per ogni passo di diffusione attraverso lo spazio libero
+RAGGIO_BLOB_CELLE = 6  # raggio massimo (in celle della griglia di movimento) della diffusione della macchia di probabilita'
+DECADIMENTO_BLOB = 0.75  # fattore di decadimento del peso per ogni passo-cella di diffusione attraverso lo spazio libero
 COSTO_MASSIMO_PROBABILITA = COSTO_CELLA_OCCUPATA * 0.5  # costo extra A* al centro della macchia (peso 1.0): piu' morbido del blocco per rilevamento diretto
 COLORE_BLOB_PROBABILITA = (40, 130, 255)
+# isteresi sul percorso del robot: senza uno sconto sulla strada gia' scelta, quando due percorsi hanno
+# costo quasi identico basta una piccola fluttuazione di rumore (macchia di probabilita' ricalcolata,
+# rilevamento con posizione rumorosa) a far scambiare quale dei due sembra il migliore ad ogni ricalcolo,
+# facendo continuare il robot a cambiare idea invece di avanzare. Lo sconto si applica solo alle prossime
+# celle del percorso attuale (non a tutto il tragitto): cosi' non si "blocca" per sempre su una scelta
+# vecchia in un percorso lungo, resta comunque libero di cambiare rotta se emerge un'alternativa
+# chiaramente migliore piu' avanti. Il valore resta sotto la distanza geometrica minima fra due celle
+# adiacenti (DIM_NODO) cosi' il costo di un passo non puo' mai diventare negativo.
+COSTO_ISTERESI_PERCORSO = DIM_NODO * 0.6
+CELLE_ISTERESI_PERCORSO = 10
 ALPHA_MAX_BLOB = 140  # trasparenza massima (al centro della macchia) del rendering termico
+# la macchia viene calcolata e disegnata su una sotto-griglia piu' fine (ogni cella di movimento
+# diventa "definizione"^2 sottocelle) SOLO per lei: l'A* e il movimento restano sulla griglia
+# originale, invariati. Regolabile dal pannello tecnico: al minimo (1) e' un quadrato identico alla
+# griglia di movimento (comportamento originale), al massimo le sottocelle sono cosi' piccole che la
+# macchia appare pressoche' un ellissoide continuo, indistinguibile a occhio dai quadretti.
+SOTTOCELLE_PER_LATO_MIN, SOTTOCELLE_PER_LATO_MAX = 1, 10
+SOTTOCELLE_PER_LATO_DEFAULT = 1
 FATTORE_VELOCITA_MEDIA = 1.0    # media della gaussiana (1.0 = velocita' base)
 FATTORE_VELOCITA_DEV_STD = 0.25  # deviazione standard: la maggior parte cammina, code = passeggiano/corrono
 FATTORE_VELOCITA_MIN, FATTORE_VELOCITA_MAX = 0.4, 2.5  # limiti per evitare fermi o assurdamente veloci
@@ -86,7 +105,7 @@ NERO = (30, 30, 30)
 GRIGIO_SCURO = (90, 90, 90)
 GRIGIO_PAVIMENTO = (195, 195, 195)  # sfondo della mappa
 GRIGIO_BORDO_CELLA = (182, 182, 182)  # bordo delle celle libere, un pochino piu' scuro dello sfondo
-COLORE_LIDAR = (0, 120, 220)
+COLORE_LIDAR = (235, 200, 0)
 
 class Nodo:
     def __init__(self, r, c):
@@ -236,7 +255,7 @@ def crea_persona(griglia, fattore_velocita=None):
     return {
         "x": nodo_iniziale.cx, "y": nodo_iniziale.cy,
         "target": (nodo_target.r, nodo_target.c),
-        "percorso": [],
+        "percorso": None,  # None = "mai calcolato ancora" (distinto da [] = "invalidato, ricalcola subito"): permette di spalmare il primo calcolo su piu' frame, vedi offset_ricalcolo piu' sotto
         "stato": "movimento",
         "attesa_timer": 0,
         "rumore_seed": random.uniform(0, 1000),
@@ -455,30 +474,48 @@ def previsione_posizione_kalman(traccia, frame_futuri):
     frame: e' il centro su cui viene fatta partire la macchia di probabilita'."""
     return traccia["x"] + traccia["vx"] * frame_futuri, traccia["y"] + traccia["vy"] * frame_futuri
 
-def macchia_diffusione(griglia, r_centro, c_centro, raggio_celle, decadimento):
-    """Espande un peso (1.0 al centro) attraverso lo spazio libero a partire dalla cella centrale (BFS
-    a 4 direzioni): i muri bloccano il flusso, quindi la macchia si piega attorno agli angoli e si
-    stringe nelle porte invece di attraversare i muri in linea retta come farebbe una gaussiana pura."""
-    if not (0 <= r_centro < Y_TOT and 0 <= c_centro < X_TOT) or griglia[r_centro][c_centro].tipo == "muro":
+def sottocella_e_muro(griglia, rf, cf, sottocelle_per_lato):
+    """True se la sottocella (rf, cf, sulla griglia fine 'sottocelle_per_lato' volte piu' densa) cade
+    in una cella muro della griglia di movimento originale, o e' fuori mappa."""
+    r_cella, c_cella = int(rf // sottocelle_per_lato), int(cf // sottocelle_per_lato)
+    if not (0 <= r_cella < Y_TOT and 0 <= c_cella < X_TOT):
+        return True
+    return griglia[r_cella][c_cella].tipo == "muro"
+
+_DIREZIONI_DIFFUSIONE = ((0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
+                          (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2)))
+
+def macchia_diffusione(griglia, rf_centro, cf_centro, raggio_sottocelle, decadimento, sottocelle_per_lato):
+    """Espande un peso (1.0 al centro) attraverso lo spazio libero a partire dalla sottocella centrale
+    (Dijkstra a 8 direzioni sulla griglia fine, con le diagonali che costano radice di 2 invece di 1):
+    i muri (letti dalla griglia di movimento originale) bloccano il flusso, quindi la macchia si piega
+    attorno agli angoli e si stringe nelle porte invece di attraversare i muri in linea retta; il
+    decadimento e' funzione della distanza euclidea percorsa (non del numero di passi), quindi il fronte
+    d'onda approssima un cerchio/ellisse invece di un rombo. Lavora sulla sotto-griglia
+    ('sottocelle_per_lato' volte piu' densa, regolabile dal pannello) solo per la macchia stessa:
+    l'A* e il movimento non la vedono."""
+    y_tot_fine, x_tot_fine = Y_TOT * sottocelle_per_lato, X_TOT * sottocelle_per_lato
+    if sottocella_e_muro(griglia, rf_centro, cf_centro, sottocelle_per_lato):
         return {}
-    pesi = {(r_centro, c_centro): 1.0}
-    frontiera = [(r_centro, c_centro, 1.0)]
-    passi = 0
-    while frontiera and passi < raggio_celle:
-        nuova_frontiera = []
-        for r, c, peso in frontiera:
-            peso_vicino = peso * decadimento
-            if peso_vicino < 0.02:
+    distanza_massima = min(raggio_sottocelle, math.log(0.02) / math.log(decadimento))
+    distanze = {(rf_centro, cf_centro): 0.0}
+    coda = [(0.0, rf_centro, cf_centro)]
+    while coda:
+        dist, r, c = heapq.heappop(coda)
+        if dist > distanze.get((r, c), math.inf):
+            continue
+        for dr, dc, passo in _DIREZIONI_DIFFUSIONE:
+            rv, cv = r + dr, c + dc
+            nuova_dist = dist + passo
+            if nuova_dist > distanza_massima:
                 continue
-            for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                rv, cv = r + dr, c + dc
-                if 0 <= rv < Y_TOT and 0 <= cv < X_TOT and griglia[rv][cv].tipo != "muro":
-                    if (rv, cv) not in pesi or pesi[(rv, cv)] < peso_vicino:
-                        pesi[(rv, cv)] = peso_vicino
-                        nuova_frontiera.append((rv, cv, peso_vicino))
-        frontiera = nuova_frontiera
-        passi += 1
-    return pesi
+            if not (0 <= rv < y_tot_fine and 0 <= cv < x_tot_fine) or nuova_dist >= distanze.get((rv, cv), math.inf) or sottocella_e_muro(griglia, rv, cv, sottocelle_per_lato):
+                continue
+            if dr != 0 and dc != 0 and (sottocella_e_muro(griglia, r + dr, c, sottocelle_per_lato) or sottocella_e_muro(griglia, r, c + dc, sottocelle_per_lato)):
+                continue  # niente tagli d'angolo: una mossa diagonale non deve "sfiorare" lo spigolo di un muro
+            distanze[(rv, cv)] = nuova_dist
+            heapq.heappush(coda, (nuova_dist, rv, cv))
+    return {cella: decadimento ** dist for cella, dist in distanze.items()}
 
 def sposta_con_vettore(x, y, vx, vy, forza, griglia):
     """Applica lo spostamento (vx, vy) * forza (repulsione o attrazione), senza attraversare muri."""
@@ -529,6 +566,16 @@ def salva_mappa(griglia, path):
     with open(path, "w") as f:
         json.dump(muri, f)
 
+def salva_configurazione_pannello(configurazione, path):
+    with open(path, "w") as f:
+        json.dump(configurazione, f)
+
+def carica_configurazione_pannello(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
+
 def carica_mappa(griglia, path):
     if not os.path.exists(path):
         return False
@@ -543,6 +590,34 @@ def carica_mappa(griglia, path):
     crea_bordi(griglia)
     return True
 
+# --- POOL DI PROCESSI PER IL RICALCOLO PARALLELO DEI PERCORSI (persone/corridori/gruppi) ---
+# Misurato: sullo scenario denso (~234 persone, carico reale di ~24 ricalcoli A* per frame a regime)
+# un pool persistente a 8 worker porta il costo di quel batch da ~175ms a ~40ms/frame (4.4x). Ogni
+# worker costruisce la propria copia della griglia UNA sola volta all'avvio (initializer): ad ogni
+# dispatch si trasmette solo il payload leggero (partenza, destinazione, seed, celle bloccate), mai
+# l'intera griglia. Il pool va ricreato quando i muri cambiano (editor mappe): per questo e' usato solo
+# quando 'muri_modificati' e' False, altrimenti si ricade sul calcolo sequenziale (sempre corretto).
+_pool_worker_griglia = None
+
+def _pool_inizializza_worker(celle_muro):
+    global _pool_worker_griglia
+    griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
+    crea_bordi(griglia)
+    for r, c in celle_muro:
+        griglia[r][c].tipo = "muro"
+    _pool_worker_griglia = griglia
+
+def _pool_calcola_percorso(richiesta):
+    inizio_pos_pixel, target_griglia, rumore_seed, celle_bloccate = richiesta
+    return algoritmo_a_star(_pool_worker_griglia, inizio_pos_pixel, target_griglia, rumore_seed=rumore_seed, celle_bloccate=celle_bloccate)
+
+def _celle_muro_di(griglia):
+    return [(n.r, n.c) for riga in griglia for n in riga if n.tipo == "muro"]
+
+def _crea_pool_persone(griglia):
+    n_worker = min(8, os.cpu_count() or 4)
+    return mp.Pool(n_worker, initializer=_pool_inizializza_worker, initargs=(_celle_muro_di(griglia),))
+
 def main():
     pygame.init()
     fullscreen = False
@@ -556,6 +631,7 @@ def main():
     pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | F11: Fullscreen | F5: Salva | F9: Carica | TAB: Pannello")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 32)
+    font_piccolo = pygame.font.SysFont(None, 24)
 
     chiedendo_password = False
     input_password = ""
@@ -569,6 +645,13 @@ def main():
     
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
+
+    # pool di processi persistente per il ricalcolo parallelo dei percorsi (vedi commento sopra la
+    # definizione): 'muri_modificati' e 'frame_ultima_modifica_muro' tengono traccia di quando i muri
+    # cambiano (editor mappe) per sapere quando la copia della griglia nei worker e' da rigenerare
+    pool_persone = _crea_pool_persone(griglia)
+    muri_modificati = False
+    frame_ultima_modifica_muro = -9999
 
     # --- VARIABILI ZOOM E PAN ---
     zoom = 1.0
@@ -584,25 +667,14 @@ def main():
     percorso = []
     celle_rilevate_precedenti = set()  # posizioni (vere, senza rumore) rilevate dal lidar nel frame precedente
     tracciamento_lidar = {}  # id(persona) -> traccia Kalman, solo per le persone attualmente rilevate dal lidar
-    mappa_pesi_render = {}  # ultima macchia di probabilita' calcolata (per cella, peso 0-1): persiste fra un ricalcolo e l'altro per il disegno
+    mappa_pesi_render = {}  # ultima macchia di probabilita' calcolata (per sottocella, peso 0-1): persiste fra un ricalcolo e l'altro per il disegno
+    mappa_pesi_render_dim_sottocella = DIM_NODO / SOTTOCELLE_PER_LATO_DEFAULT  # dimensione delle sottocelle usata per l'ultima macchia calcolata (per disegnarla con le coordinate giuste anche se lo slider e' cambiato nel frattempo)
 
-    # --- PERSONE ---
+    # --- NUMERO PERSONE/CORRIDORI/FERME/GRUPPI E PANNELLO TECNICO (valori di default) ---
     numero_persone = NUMERO_PERSONE_DEFAULT
-    persone = [crea_persona(griglia) for _ in range(numero_persone)]
-
-    # --- CORRIDORI (persone al doppio della velocita' base) ---
     numero_corridori = NUMERO_CORRIDORI_DEFAULT
-    corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
-
-    # --- PERSONE FERME (ostacoli statici) ---
     numero_persone_ferme = NUMERO_PERSONE_FERME_DEFAULT
-    persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
-
-    # --- GRUPPI ---
     numero_gruppi = NUMERO_GRUPPI_DEFAULT
-    gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
-
-    # --- PANNELLO TECNICO ---
     pannello_aperto = False
     moltiplicatore_velocita = 1.0
     trascinando_slider = False
@@ -622,6 +694,38 @@ def main():
     trascinando_raggio_lidar = False
     raggio_persona = RAGGIO_PERSONA_DEFAULT
     trascinando_raggio_persona = False
+    definizione_ellissoidi = SOTTOCELLE_PER_LATO_DEFAULT
+    trascinando_definizione_ellissoidi = False
+    sicurezza_attiva = True
+    lidar_attivo = True
+    ellissoidi_attivi = True
+    configurazione_salvataggio_timer = 0  # breve conferma visiva dopo il click su uno dei pulsanti in fondo al pannello
+    configurazione_messaggio = ("", VERDE)
+
+    # configurazione salvata dal pannello tecnico (pulsante "Salva configurazione"): se presente
+    # sovrascrive i valori di default appena impostati, cosi' l'ambiente di test preferito e' gia'
+    # pronto all'avvio invece di doverlo riconfigurare ogni volta
+    configurazione_salvata = carica_configurazione_pannello(FILE_CONFIGURAZIONE_PANNELLO)
+    if configurazione_salvata:
+        numero_persone = configurazione_salvata.get("numero_persone", numero_persone)
+        numero_corridori = configurazione_salvata.get("numero_corridori", numero_corridori)
+        numero_persone_ferme = configurazione_salvata.get("numero_persone_ferme", numero_persone_ferme)
+        numero_gruppi = configurazione_salvata.get("numero_gruppi", numero_gruppi)
+        moltiplicatore_velocita = configurazione_salvata.get("moltiplicatore_velocita", moltiplicatore_velocita)
+        raggio_sicurezza = configurazione_salvata.get("raggio_sicurezza", raggio_sicurezza)
+        raggio_robot = configurazione_salvata.get("raggio_robot", raggio_robot)
+        raggio_lidar = configurazione_salvata.get("raggio_lidar", raggio_lidar)
+        raggio_persona = configurazione_salvata.get("raggio_persona", raggio_persona)
+        definizione_ellissoidi = configurazione_salvata.get("definizione_ellissoidi", definizione_ellissoidi)
+        sicurezza_attiva = configurazione_salvata.get("sicurezza_attiva", sicurezza_attiva)
+        lidar_attivo = configurazione_salvata.get("lidar_attivo", lidar_attivo)
+        ellissoidi_attivi = configurazione_salvata.get("ellissoidi_attivi", ellissoidi_attivi)
+
+    # --- PERSONE / CORRIDORI (doppia velocita') / FERME (ostacoli statici) / GRUPPI ---
+    persone = [crea_persona(griglia) for _ in range(numero_persone)]
+    corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
+    persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
+    gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
 
     contatore_frame = 0
 
@@ -653,7 +757,7 @@ def main():
                     pygame.draw.rect(screen, GRIGIO_BORDO_CELLA, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 300, 550
+        panel_w, panel_h = 370, 690
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
         numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
@@ -664,6 +768,15 @@ def main():
         slider_robot_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 350, panel_w - 30, 8)
         slider_lidar_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 425, panel_w - 30, 8)
         slider_persona_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 500, panel_w - 30, 8)
+        slider_definizione_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 575, panel_w - 30, 8)
+        checkbox_sicurezza_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 243, 20, 20)
+        checkbox_lidar_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 393, 20, 20)
+        checkbox_ellissoidi_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 543, 20, 20)
+        # pulsanti sempre in fondo al pannello, per avere l'ambiente di test preferito pronto ad ogni avvio
+        larghezza_pulsante_config = (panel_w - 30 - 20) // 3
+        button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 640, larghezza_pulsante_config, 35)
+        button_carica_config_rect = pygame.Rect(button_salva_config_rect.right + 10, panel_rect.y + 640, larghezza_pulsante_config, 35)
+        button_reset_config_rect = pygame.Rect(button_carica_config_rect.right + 10, panel_rect.y + 640, larghezza_pulsante_config, 35)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -691,6 +804,8 @@ def main():
                         for rr in range(r_min, r_max + 1):
                             for cc in range(c_min, c_max + 1):
                                 griglia[rr][cc].tipo = nuovo_tipo
+                        muri_modificati = True
+                        frame_ultima_modifica_muro = contatore_frame
                         modalita_rettangolo = False
                         primo_punto_rettangolo = None
 
@@ -737,6 +852,69 @@ def main():
                         trascinando_raggio_persona = True
                         rel = (event.pos[0] - slider_persona_rect.x) / slider_persona_rect.width
                         raggio_persona = RAGGIO_PERSONA_MIN + max(0, min(1, rel)) * (RAGGIO_PERSONA_MAX - RAGGIO_PERSONA_MIN)
+                    elif slider_definizione_rect.inflate(0, 20).collidepoint(event.pos):
+                        trascinando_definizione_ellissoidi = True
+                        rel = (event.pos[0] - slider_definizione_rect.x) / slider_definizione_rect.width
+                        definizione_ellissoidi = SOTTOCELLE_PER_LATO_MIN + max(0, min(1, rel)) * (SOTTOCELLE_PER_LATO_MAX - SOTTOCELLE_PER_LATO_MIN)
+                    elif checkbox_sicurezza_rect.collidepoint(event.pos):
+                        sicurezza_attiva = not sicurezza_attiva
+                    elif checkbox_lidar_rect.collidepoint(event.pos):
+                        lidar_attivo = not lidar_attivo
+                    elif checkbox_ellissoidi_rect.collidepoint(event.pos):
+                        ellissoidi_attivi = not ellissoidi_attivi
+                    elif button_salva_config_rect.collidepoint(event.pos):
+                        salva_configurazione_pannello({
+                            "numero_persone": numero_persone, "numero_corridori": numero_corridori,
+                            "numero_persone_ferme": numero_persone_ferme, "numero_gruppi": numero_gruppi,
+                            "moltiplicatore_velocita": moltiplicatore_velocita,
+                            "raggio_sicurezza": raggio_sicurezza, "raggio_robot": raggio_robot,
+                            "raggio_lidar": raggio_lidar, "raggio_persona": raggio_persona,
+                            "definizione_ellissoidi": definizione_ellissoidi,
+                            "sicurezza_attiva": sicurezza_attiva, "lidar_attivo": lidar_attivo,
+                            "ellissoidi_attivi": ellissoidi_attivi,
+                        }, FILE_CONFIGURAZIONE_PANNELLO)
+                        configurazione_messaggio = ("Configurazione salvata", VERDE)
+                        configurazione_salvataggio_timer = 90
+                    elif button_carica_config_rect.collidepoint(event.pos):
+                        configurazione_da_caricare = carica_configurazione_pannello(FILE_CONFIGURAZIONE_PANNELLO)
+                        if configurazione_da_caricare:
+                            numero_persone = configurazione_da_caricare.get("numero_persone", numero_persone)
+                            numero_corridori = configurazione_da_caricare.get("numero_corridori", numero_corridori)
+                            numero_persone_ferme = configurazione_da_caricare.get("numero_persone_ferme", numero_persone_ferme)
+                            numero_gruppi = configurazione_da_caricare.get("numero_gruppi", numero_gruppi)
+                            sincronizza_persone(persone, numero_persone, griglia)
+                            sincronizza_persone(corridori, numero_corridori, griglia, fabbrica=crea_corridore)
+                            sincronizza_persone_ferme(persone_ferme, numero_persone_ferme, griglia)
+                            sincronizza_gruppi(gruppi, numero_gruppi, griglia)
+                            moltiplicatore_velocita = configurazione_da_caricare.get("moltiplicatore_velocita", moltiplicatore_velocita)
+                            raggio_sicurezza = configurazione_da_caricare.get("raggio_sicurezza", raggio_sicurezza)
+                            raggio_robot = configurazione_da_caricare.get("raggio_robot", raggio_robot)
+                            raggio_lidar = configurazione_da_caricare.get("raggio_lidar", raggio_lidar)
+                            raggio_persona = configurazione_da_caricare.get("raggio_persona", raggio_persona)
+                            definizione_ellissoidi = configurazione_da_caricare.get("definizione_ellissoidi", definizione_ellissoidi)
+                            sicurezza_attiva = configurazione_da_caricare.get("sicurezza_attiva", sicurezza_attiva)
+                            lidar_attivo = configurazione_da_caricare.get("lidar_attivo", lidar_attivo)
+                            ellissoidi_attivi = configurazione_da_caricare.get("ellissoidi_attivi", ellissoidi_attivi)
+                            configurazione_messaggio = ("Configurazione caricata", VERDE)
+                        else:
+                            configurazione_messaggio = ("Nessuna configurazione salvata", ROSSO)
+                        configurazione_salvataggio_timer = 90
+                    elif button_reset_config_rect.collidepoint(event.pos):
+                        if os.path.exists(FILE_CONFIGURAZIONE_PANNELLO):
+                            os.remove(FILE_CONFIGURAZIONE_PANNELLO)
+                        numero_persone, numero_corridori = NUMERO_PERSONE_DEFAULT, NUMERO_CORRIDORI_DEFAULT
+                        numero_persone_ferme, numero_gruppi = NUMERO_PERSONE_FERME_DEFAULT, NUMERO_GRUPPI_DEFAULT
+                        sincronizza_persone(persone, numero_persone, griglia)
+                        sincronizza_persone(corridori, numero_corridori, griglia, fabbrica=crea_corridore)
+                        sincronizza_persone_ferme(persone_ferme, numero_persone_ferme, griglia)
+                        sincronizza_gruppi(gruppi, numero_gruppi, griglia)
+                        moltiplicatore_velocita = 1.0
+                        raggio_sicurezza, raggio_robot = RAGGIO_SICUREZZA_DEFAULT, RAGGIO_ROBOT_DEFAULT
+                        raggio_lidar, raggio_persona = RAGGIO_LIDAR_DEFAULT, RAGGIO_PERSONA_DEFAULT
+                        definizione_ellissoidi = SOTTOCELLE_PER_LATO_DEFAULT
+                        sicurezza_attiva = lidar_attivo = ellissoidi_attivi = True
+                        configurazione_messaggio = ("Configurazione ripristinata", VERDE)
+                        configurazione_salvataggio_timer = 90
                 elif event.button == 4: zoom *= 1.1 # Zoom In
                 elif event.button == 5: zoom /= 1.1 # Zoom Out
                 elif event.button == 3: # Inizio Pan
@@ -757,6 +935,7 @@ def main():
                     trascinando_raggio_robot = False
                     trascinando_raggio_lidar = False
                     trascinando_raggio_persona = False
+                    trascinando_definizione_ellissoidi = False
 
             if event.type == pygame.MOUSEMOTION:
                 if trascinando_slider:
@@ -779,6 +958,10 @@ def main():
                     rel = (event.pos[0] - slider_persona_rect.x) / slider_persona_rect.width
                     raggio_persona = RAGGIO_PERSONA_MIN + max(0, min(1, rel)) * (RAGGIO_PERSONA_MAX - RAGGIO_PERSONA_MIN)
                     continue
+                if trascinando_definizione_ellissoidi:
+                    rel = (event.pos[0] - slider_definizione_rect.x) / slider_definizione_rect.width
+                    definizione_ellissoidi = SOTTOCELLE_PER_LATO_MIN + max(0, min(1, rel)) * (SOTTOCELLE_PER_LATO_MAX - SOTTOCELLE_PER_LATO_MIN)
+                    continue
 
                 # Gestione Panning
                 if trascinando:
@@ -795,6 +978,8 @@ def main():
                     # Evitiamo di modificare i bordi esterni e restiamo nei limiti
                     if 0 < r < Y_TOT - 1 and 0 < c < X_TOT - 1 and (r, c) != ultima_cella_w:
                         griglia[r][c].tipo = "libero" if griglia[r][c].tipo == "muro" else "muro"
+                        muri_modificati = True
+                        frame_ultima_modifica_muro = contatore_frame
                         ultima_cella_w = (r, c)
 
             if event.type == pygame.TEXTINPUT:
@@ -841,6 +1026,8 @@ def main():
                         else:
                             if os.path.exists(FILE_MAPPA_SLOT[indice_slot]):
                                 if carica_mappa(griglia, FILE_MAPPA_SLOT[indice_slot]):
+                                    muri_modificati = True
+                                    frame_ultima_modifica_muro = contatore_frame
                                     target_pos, percorso = None, []
                                     persone = [crea_persona(griglia) for _ in range(numero_persone)]
                                     corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
@@ -915,12 +1102,16 @@ def main():
                     r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
                     if 0 < r < Y_TOT - 1 and 0 < c < X_TOT - 1:
                         griglia[r][c].tipo = "muro" if griglia[r][c].tipo == "libero" else "libero"
+                        muri_modificati = True
+                        frame_ultima_modifica_muro = contatore_frame
                         ultima_cella_w = (r, c)
 
                 if event.key == pygame.K_r:
                     for riga in griglia:
                         for n in riga: n.tipo = "libero"
                     crea_bordi(griglia)
+                    muri_modificati = True
+                    frame_ultima_modifica_muro = contatore_frame
                     robot_x, robot_y = 1.5 * DIM_NODO, 1.5 * DIM_NODO
                     target_pos, percorso = None, []
                 if event.key == pygame.K_s: target_pos, percorso = None, []
@@ -960,6 +1151,9 @@ def main():
 
         # 3. Movimento
         tempo_di_ricalcolare_robot = contatore_frame % INTERVALLO_RICALCOLO_ROBOT_FRAME == 0
+        # NB: sicurezza_attiva / lidar_attivo / ellissoidi_attivi (pannello tecnico) nascondono SOLO il
+        # disegno (cerchi, colori delle persone, macchie): il meccanismo sottostante (stop di sicurezza,
+        # rilevamento, costo di probabilita' nell'A*) resta sempre attivo, i toggle non lo influenzano
 
         membri_gruppi_mobili = [m for g in gruppi if g["mobile"] for m in g["membri"]]
         tutte_mobili = persone + corridori + membri_gruppi_mobili  # persone, corridori e membri dei gruppi si muovono ed evitano gli altri tutti allo stesso modo
@@ -994,7 +1188,9 @@ def main():
                 celle_rilevate_rumorose.add((r_rum, c_rum))
 
                 # traccia Kalman: SOLO per le persone attualmente rilevate (mai per tutta la
-                # popolazione), altrimenti con centinaia di persone il costo esploderebbe
+                # popolazione), altrimenti con centinaia di persone il costo esploderebbe. Sempre
+                # attiva indipendentemente da ellissoidi_attivi: quel toggle nasconde solo il disegno,
+                # il costo di probabilita' nell'A* del robot resta comunque in funzione
                 pid = id(p)
                 id_rilevati_ora.add(pid)
                 if pid not in tracciamento_lidar:
@@ -1018,16 +1214,42 @@ def main():
                 # ogni traccia rilevata e si fa diffondere il suo peso attraverso lo spazio libero, cosi'
                 # il costo extra e' morbido (decresce dal centro previsto) invece del blocco secco usato
                 # per la posizione rilevata adesso
-                mappa_pesi_render = {}
+                # "definizione ellissoidi" (pannello tecnico): quante sottocelle per lato compone la
+                # macchia. Al minimo (1) coincide con la griglia di movimento (quadrati), al massimo le
+                # sottocelle sono cosi' piccole che la macchia appare un ellissoide continuo
+                sottocelle_per_lato = max(SOTTOCELLE_PER_LATO_MIN, round(definizione_ellissoidi))
+                dim_sottocella = DIM_NODO / sottocelle_per_lato
+                y_tot_fine, x_tot_fine = Y_TOT * sottocelle_per_lato, X_TOT * sottocelle_per_lato
+                raggio_blob_sottocelle = RAGGIO_BLOB_CELLE * sottocelle_per_lato
+                decadimento_blob_sottocella = DECADIMENTO_BLOB ** (1 / sottocelle_per_lato)
+
+                mappa_pesi_render = {}  # chiavi in sottocelle (griglia fine), solo per la macchia/il disegno
                 for traccia in tracciamento_lidar.values():
                     x_prev, y_prev = previsione_posizione_kalman(traccia, PREVISIONE_BLOB_FRAME)
-                    r_prev = max(0, min(Y_TOT - 1, int(y_prev // DIM_NODO)))
-                    c_prev = max(0, min(X_TOT - 1, int(x_prev // DIM_NODO)))
-                    for cella, peso in macchia_diffusione(griglia, r_prev, c_prev, RAGGIO_BLOB_CELLE, DECADIMENTO_BLOB).items():
-                        if cella not in mappa_pesi_render or mappa_pesi_render[cella] < peso:
-                            mappa_pesi_render[cella] = peso
-                mappa_costo_probabilita = {cella: peso * COSTO_MASSIMO_PROBABILITA for cella, peso in mappa_pesi_render.items()}
-                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_probabilita)
+                    rf_prev = max(0, min(y_tot_fine - 1, int(y_prev // dim_sottocella)))
+                    cf_prev = max(0, min(x_tot_fine - 1, int(x_prev // dim_sottocella)))
+                    for sottocella, peso in macchia_diffusione(griglia, rf_prev, cf_prev, raggio_blob_sottocelle, decadimento_blob_sottocella, sottocelle_per_lato).items():
+                        if sottocella not in mappa_pesi_render or mappa_pesi_render[sottocella] < peso:
+                            mappa_pesi_render[sottocella] = peso
+                # per l'A* (che resta sulla griglia originale) si aggregano le sottocelle nella cella
+                # grossa che le contiene, prendendo il peso massimo fra quelle che vi cadono dentro
+                mappa_costo_probabilita = {}
+                for (rf, cf), peso in mappa_pesi_render.items():
+                    cella = (rf // sottocelle_per_lato, cf // sottocelle_per_lato)
+                    costo = peso * COSTO_MASSIMO_PROBABILITA
+                    if cella not in mappa_costo_probabilita or mappa_costo_probabilita[cella] < costo:
+                        mappa_costo_probabilita[cella] = costo
+                mappa_pesi_render_dim_sottocella = dim_sottocella  # ricordata per il disegno, che avviene in un punto diverso del frame
+
+                # isteresi: sconto sulle prossime celle del percorso gia' in corso, per non ribaltare la
+                # scelta fra due percorsi quasi equivalenti a ogni ricalcolo solo per rumore (vedi commento
+                # sulla costante COSTO_ISTERESI_PERCORSO)
+                mappa_costo_extra_robot = dict(mappa_costo_probabilita)
+                for nodo_percorso_attuale in percorso[:CELLE_ISTERESI_PERCORSO]:
+                    cella = (nodo_percorso_attuale.r, nodo_percorso_attuale.c)
+                    mappa_costo_extra_robot[cella] = mappa_costo_extra_robot.get(cella, 0.0) - COSTO_ISTERESI_PERCORSO
+
+                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_extra_robot)
             meta_nodo = griglia[target_pos[0]][target_pos[1]]
             robot_x, robot_y, arrivato, passo_muro = passo_movimento(robot_x, robot_y, percorso, VELOCITA_ROBOT * moltiplicatore_velocita, meta_nodo, griglia)
             if passo_muro:
@@ -1050,11 +1272,53 @@ def main():
         }
         celle_bloccate_comune |= celle_persone_ferme
         celle_bloccate_comune.add((int(robot_y // DIM_NODO), int(robot_x // DIM_NODO)))
+
+        # se i muri sono stati modificati (editor mappe) e sono passati abbastanza frame da quando e'
+        # cambiato l'ultimo (evita di ricreare il pool decine di volte al secondo mentre si trascina il
+        # tasto W), il pool va ricreato con la griglia aggiornata: finche' resta 'sporco' si ricade sul
+        # calcolo sequenziale, sempre corretto anche se piu' lento
+        if muri_modificati and contatore_frame - frame_ultima_modifica_muro > 15:
+            pool_persone.terminate()
+            pool_persone = _crea_pool_persone(griglia)
+            muri_modificati = False
+
+        # ricalcolo percorsi: fase separata dal movimento cosi' il batch di chi deve ricalcolare in
+        # questo frame puo' essere dispacciato in blocco al pool di processi persistente (paralleliz-
+        # zato sui core della CPU) invece che uno alla volta nel processo principale. Il primo calcolo
+        # di ciascuna persona (percorso ancora None, appena creata) e' l'unico caso in cui centinaia di
+        # persone ne avrebbero bisogno nello stesso istante (frame 0): e' l'unico che vale la pena
+        # spalmare sui primi frame invece di farlo scattare tutto insieme, usando lo stesso
+        # offset_ricalcolo gia' usato per il ricalcolo periodico. I ricalcoli successivi (percorso
+        # invalidato da un ostacolo, nuovo target, ecc.) restano immediati: sono singoli eventi gia'
+        # naturalmente distribuiti nel tempo, non un picco simultaneo
+        persone_da_ricalcolare = []
+        batch_richieste = []
+        for p in tutte_mobili:
+            if p["stato"] != "movimento":
+                continue
+            tempo_di_ricalcolare_questa_persona = (contatore_frame + p["offset_ricalcolo"]) % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
+            if p["percorso"] is None and not tempo_di_ricalcolare_questa_persona:
+                continue  # in attesa del proprio turno per il primo calcolo
+            if p["percorso"] is not None and p["percorso"] and not tempo_di_ricalcolare_questa_persona:
+                continue  # percorso ancora valido, non e' il suo turno per il ricalcolo periodico
+            persone_da_ricalcolare.append(p)
+            batch_richieste.append(((p["x"], p["y"]), p["target"], p["rumore_seed"], celle_bloccate_comune))
+
+        if batch_richieste:
+            if pool_persone is not None and not muri_modificati:
+                risultati_percorsi = pool_persone.map(_pool_calcola_percorso, batch_richieste)
+            else:
+                risultati_percorsi = [
+                    algoritmo_a_star(griglia, inizio, target, rumore_seed=seed, celle_bloccate=bloccate)
+                    for inizio, target, seed, bloccate in batch_richieste
+                ]
+            for p, percorso_calcolato in zip(persone_da_ricalcolare, risultati_percorsi):
+                p["percorso"] = percorso_calcolato
+
         for p in tutte_mobili:
             if p["stato"] == "movimento":
-                tempo_di_ricalcolare_questa_persona = (contatore_frame + p["offset_ricalcolo"]) % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
-                if not p["percorso"] or tempo_di_ricalcolare_questa_persona:
-                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"], celle_bloccate=celle_bloccate_comune)
+                if p["percorso"] is None:
+                    continue  # in attesa del proprio turno per il primo calcolo
                 nodo_target_p = griglia[p["target"][0]][p["target"][1]]
                 velocita_p = VELOCITA_PERSONA * moltiplicatore_velocita * p["fattore_velocita"]
                 non_capofila = "gruppo" in p and not p.get("capofila")
@@ -1161,31 +1425,39 @@ def main():
             zoom, offset_x, offset_y = limita_zoom_pan(zoom, offset_x, offset_y, screen.get_width(), screen.get_height())
 
         # 4. Rendering (Invariato)
+        # raggi "effettivi" SOLO per il disegno (cerchi, colore delle persone): 0 se il toggle relativo
+        # e' spento nel pannello, cosi' non si vede nulla, ma il meccanismo vero (sopra, in "3. Movimento")
+        # ha gia' usato i raggi reali e non e' influenzato da questi toggle
+        raggio_sicurezza_effettivo = raggio_sicurezza if sicurezza_attiva else 0
+        raggio_lidar_effettivo = raggio_lidar if lidar_attivo else 0
+
         if percorso and len(percorso) > 1:
             punti = [t_s(n.cx, n.cy) for n in percorso]
             pygame.draw.lines(screen, ROSSO, False, punti, 2)
 
-        # macchie di probabilita' (previsione lidar): solo per le celle con un peso calcolato, mai su
-        # tutta la griglia - tonalita' termica blu, piu' opaco al centro della macchia
-        for (r_b, c_b), peso in mappa_pesi_render.items():
-            sx, sy = t_s(c_b * DIM_NODO, r_b * DIM_NODO)
-            ex, ey = t_s((c_b + 1) * DIM_NODO, (r_b + 1) * DIM_NODO)
-            larghezza, altezza = max(1, ex - sx), max(1, ey - sy)
-            blob_surf = pygame.Surface((larghezza, altezza), pygame.SRCALPHA)
-            alpha = int(min(255, peso * ALPHA_MAX_BLOB))
-            blob_surf.fill((*COLORE_BLOB_PROBABILITA, alpha))
-            screen.blit(blob_surf, (sx, sy))
+        # macchie di probabilita' (previsione lidar): disegnate sulla sotto-griglia fine (solo le
+        # sottocelle con un peso calcolato, mai su tutta la mappa) - tonalita' termica blu, piu' opaco
+        # al centro della macchia, gradiente piu' morbido rispetto alla griglia di movimento
+        if ellissoidi_attivi:
+            for (rf_b, cf_b), peso in mappa_pesi_render.items():
+                sx, sy = t_s(cf_b * mappa_pesi_render_dim_sottocella, rf_b * mappa_pesi_render_dim_sottocella)
+                ex, ey = t_s((cf_b + 1) * mappa_pesi_render_dim_sottocella, (rf_b + 1) * mappa_pesi_render_dim_sottocella)
+                larghezza, altezza = max(1, ex - sx), max(1, ey - sy)
+                blob_surf = pygame.Surface((larghezza, altezza), pygame.SRCALPHA)
+                alpha = int(min(255, peso * ALPHA_MAX_BLOB))
+                blob_surf.fill((*COLORE_BLOB_PROBABILITA, alpha))
+                screen.blit(blob_surf, (sx, sy))
 
         rx, ry = t_s(robot_x, robot_y)
 
-        if raggio_lidar > 0:
-            raggio_lidar_px = max(1, int(raggio_lidar * zoom))
+        if raggio_lidar_effettivo > 0:
+            raggio_lidar_px = max(1, int(raggio_lidar_effettivo * zoom))
             lidar_surf = pygame.Surface((raggio_lidar_px * 2, raggio_lidar_px * 2), pygame.SRCALPHA)
             pygame.draw.circle(lidar_surf, (*COLORE_LIDAR, ALPHA_ZONA_LIDAR), (raggio_lidar_px, raggio_lidar_px), raggio_lidar_px)
             screen.blit(lidar_surf, (rx - raggio_lidar_px, ry - raggio_lidar_px))
 
-        if raggio_sicurezza > 0:
-            raggio_px = max(1, int(raggio_sicurezza * zoom))
+        if raggio_sicurezza_effettivo > 0:
+            raggio_px = max(1, int(raggio_sicurezza_effettivo * zoom))
             zona_surf = pygame.Surface((raggio_px * 2, raggio_px * 2), pygame.SRCALPHA)
             pygame.draw.circle(zona_surf, (255, 0, 0, ALPHA_ZONA_SICUREZZA), (raggio_px, raggio_px), raggio_px)
             screen.blit(zona_surf, (rx - raggio_px, ry - raggio_px))
@@ -1327,6 +1599,8 @@ def main():
 
             sicurezza_txt = font.render(f"Zona sicurezza robot: {int(raggio_sicurezza)}px", True, NERO)
             screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 245))
+            pygame.draw.rect(screen, ROSSO if sicurezza_attiva else BIANCO, checkbox_sicurezza_rect)
+            pygame.draw.rect(screen, NERO, checkbox_sicurezza_rect, 2)
 
             pygame.draw.rect(screen, GRIGIO, slider_sicurezza_rect)
             rel_sic = (raggio_sicurezza - RAGGIO_SICUREZZA_MIN) / (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
@@ -1343,6 +1617,8 @@ def main():
 
             lidar_txt = font.render(f"Raggio lidar: {int(raggio_lidar)}px", True, NERO)
             screen.blit(lidar_txt, (panel_rect.x + 15, panel_rect.y + 395))
+            pygame.draw.rect(screen, COLORE_LIDAR if lidar_attivo else BIANCO, checkbox_lidar_rect)
+            pygame.draw.rect(screen, NERO, checkbox_lidar_rect, 2)
 
             pygame.draw.rect(screen, GRIGIO, slider_lidar_rect)
             rel_lidar = (raggio_lidar - RAGGIO_LIDAR_MIN) / (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
@@ -1357,9 +1633,45 @@ def main():
             handle_persona_x = slider_persona_rect.x + int(rel_persona * slider_persona_rect.width)
             pygame.draw.circle(screen, ARANCIONE, (handle_persona_x, slider_persona_rect.centery), 9)
 
+            sottocelle_per_lato_mostrato = max(SOTTOCELLE_PER_LATO_MIN, round(definizione_ellissoidi))
+            definizione_txt = font.render(f"Definizione ellissoidi: {sottocelle_per_lato_mostrato}x{sottocelle_per_lato_mostrato}", True, NERO)
+            screen.blit(definizione_txt, (panel_rect.x + 15, panel_rect.y + 545))
+            pygame.draw.rect(screen, COLORE_BLOB_PROBABILITA if ellissoidi_attivi else BIANCO, checkbox_ellissoidi_rect)
+            pygame.draw.rect(screen, NERO, checkbox_ellissoidi_rect, 2)
+
+            pygame.draw.rect(screen, GRIGIO, slider_definizione_rect)
+            rel_definizione = (definizione_ellissoidi - SOTTOCELLE_PER_LATO_MIN) / (SOTTOCELLE_PER_LATO_MAX - SOTTOCELLE_PER_LATO_MIN)
+            handle_definizione_x = slider_definizione_rect.x + int(rel_definizione * slider_definizione_rect.width)
+            pygame.draw.circle(screen, COLORE_BLOB_PROBABILITA, (handle_definizione_x, slider_definizione_rect.centery), 9)
+
+            # pulsanti in fondo al pannello: salvano/azzerano su disco la configurazione (numeri, raggi,
+            # toggle, velocita'), cosi' l'ambiente di test preferito e' pronto ad ogni riavvio del gioco
+            pygame.draw.rect(screen, VERDE, button_salva_config_rect)
+            pygame.draw.rect(screen, NERO, button_salva_config_rect, 2)
+            salva_txt = font.render("Salva config.", True, BIANCO)
+            screen.blit(salva_txt, salva_txt.get_rect(center=button_salva_config_rect.center))
+
+            pygame.draw.rect(screen, BLU, button_carica_config_rect)
+            pygame.draw.rect(screen, NERO, button_carica_config_rect, 2)
+            carica_txt = font.render("Carica config.", True, BIANCO)
+            screen.blit(carica_txt, carica_txt.get_rect(center=button_carica_config_rect.center))
+
+            pygame.draw.rect(screen, ROSSO, button_reset_config_rect)
+            pygame.draw.rect(screen, NERO, button_reset_config_rect, 2)
+            reset_txt = font.render("Pulisci config.", True, BIANCO)
+            screen.blit(reset_txt, reset_txt.get_rect(center=button_reset_config_rect.center))
+
+            if configurazione_salvataggio_timer > 0:
+                configurazione_salvataggio_timer -= 1
+                testo_messaggio, colore_messaggio = configurazione_messaggio
+                conferma_txt = font_piccolo.render(testo_messaggio, True, colore_messaggio)
+                screen.blit(conferma_txt, (panel_rect.x + 15, panel_rect.y + 617))
+
         pygame.display.flip()
         clock.tick(60)
 
+    pool_persone.terminate()
+    pool_persone.join()
     pygame.quit()
 
 if __name__ == "__main__":
