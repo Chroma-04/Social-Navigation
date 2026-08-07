@@ -21,18 +21,22 @@ FORZA_REPULSIONE_PERSONE = 1.3  # px/frame massimi di spinta continua fra person
 COSTO_CELLA_OCCUPATA = DIM_NODO * 10  # penalita' di costo A* per una cella occupata da un'altra entita': forte ma non un divieto assoluto (evita percorsi vuoti nei passaggi a 1 cella)
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
-FILE_MAPPA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json")
+FILE_MAPPA_SLOT = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata_2.json"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata_3.json"),
+]
 PASSWORD_SALVATAGGIO = "1258"
 VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 3.0
 NUMERO_PERSONE_DEFAULT = 0
-NUMERO_PERSONE_MAX = 50
+NUMERO_PERSONE_MAX = 200
 NUMERO_PERSONE_FERME_DEFAULT = 0
 NUMERO_PERSONE_FERME_MAX = 200
 NUMERO_CORRIDORI_DEFAULT = 0
-NUMERO_CORRIDORI_MAX = 50
+NUMERO_CORRIDORI_MAX = 200
 FATTORE_VELOCITA_CORRIDORE = 2.0  # i corridori vanno sempre al doppio della velocita' base
 NUMERO_GRUPPI_DEFAULT = 0
-NUMERO_GRUPPI_MAX = 50
+NUMERO_GRUPPI_MAX = 200
 GRUPPO_MEMBRI_MIN, GRUPPO_MEMBRI_MAX = 2, 7
 GRUPPO_MEMBRI_MEDIA = 3.5  # numero di componenti a gaussiana: piu' probabile intorno a 3-4, raro vicino a 2 o 7
 GRUPPO_MEMBRI_DEV_STD = 1.1
@@ -49,8 +53,8 @@ MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
 RAGGIO_SICUREZZA_DEFAULT = 20
 ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
-RAGGIO_ROBOT_PX = DIM_NODO // 3  # raggio "fisico" del robot (lo stesso con cui viene disegnato)
-RANGE_EVITAMENTO_ROBOT = RAGGIO_ROBOT_PX + DIM_NODO // 3  # raggio robot + raggio persona: i corpi non si sovrappongono mai, indipendentemente dalla zona di sicurezza (che puo' essere piu' piccola, piu' grande o disattivata)
+RAGGIO_ROBOT_MIN, RAGGIO_ROBOT_MAX = 5, int(DIM_NODO * 1.5)
+RAGGIO_ROBOT_DEFAULT = DIM_NODO // 3  # raggio "fisico" del robot (lo stesso con cui viene disegnato di default)
 FORZA_REPULSIONE_ROBOT = 1.3  # px/frame massimi di spinta continua lontano dal robot (a distanza 0)
 FATTORE_VELOCITA_MEDIA = 1.0    # media della gaussiana (1.0 = velocita' base)
 FATTORE_VELOCITA_DEV_STD = 0.25  # deviazione standard: la maggior parte cammina, code = passeggiano/corrono
@@ -87,13 +91,17 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
 
     nodo_inizio = griglia[r_inizio][c_inizio]
     nodo_fine = griglia[r_fine][c_fine]
-    
-    for riga in griglia:
-        for n in riga: n.reset_calcoli()
+
+    # NB: la griglia non viene azzerata qui all'inizio - ogni chiamata pulisce da sola, alla fine, solo i
+    # nodi che ha effettivamente toccato (vedi 'in_open' sotto e i vari return). Resettare tutti i 4800 nodi
+    # ad ogni chiamata (come prima) costava tempo fisso indipendente dalla lunghezza del percorso: con
+    # centinaia di persone che ricalcolano il percorso piu' volte al secondo era una spesa enorme e quasi
+    # tutta inutile per percorsi brevi che toccano solo una piccola porzione della mappa.
 
     contatore = 0  # tie-breaker per lo heap (i Nodo non sono confrontabili tra loro)
     open_heap = [(0, contatore, nodo_inizio)]
-    in_open = {nodo_inizio: 0}  # nodo -> miglior g conosciuto finche' non viene chiuso
+    in_open = {nodo_inizio: 0}  # nodo -> miglior g conosciuto finche' non viene chiuso; e' anche l'insieme
+                                 # completo dei nodi toccati da questa ricerca, da ripulire prima di uscire
     closed_list = set()
 
     while open_heap:
@@ -104,9 +112,12 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
 
         if attuale == nodo_fine:
             cammino = []
-            while attuale:
-                cammino.append(attuale)
-                attuale = attuale.genitore
+            nodo_percorso = attuale
+            while nodo_percorso:
+                cammino.append(nodo_percorso)
+                nodo_percorso = nodo_percorso.genitore
+            for n in in_open:
+                n.reset_calcoli()
             return cammino[::-1]
 
         for m in [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
@@ -140,6 +151,8 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
                     in_open[vicino] = nuovo_g
                     contatore += 1
                     heapq.heappush(open_heap, (vicino.f, contatore, vicino))
+    for n in in_open:
+        n.reset_calcoli()
     return []
 
 def crea_bordi(griglia):
@@ -289,6 +302,26 @@ def sincronizza_gruppi(gruppi, numero, griglia):
     while len(gruppi) > numero:
         gruppi.pop()
 
+def costruisci_griglia_spaziale(entita_list, dim_bucket):
+    """Raggruppa le entita' in bucket quadrati di lato dim_bucket, indicizzati per cella: permette di trovare
+    i vicini di un'entita' controllando solo poche celle invece di tutte le altre entita' (O(n) invece di
+    O(n^2) man mano che il numero di persone cresce)."""
+    griglia_spaziale = {}
+    for e in entita_list:
+        chiave = (int(e["y"] // dim_bucket), int(e["x"] // dim_bucket))
+        griglia_spaziale.setdefault(chiave, []).append(e)
+    return griglia_spaziale
+
+def vicini_spaziali(entita, griglia_spaziale, dim_bucket):
+    """Entita' nel bucket di 'entita' e negli 8 adiacenti: sufficiente per non perdere nessun vicino entro
+    RANGE_EVITAMENTO_PERSONE, dato che dim_bucket (DIM_NODO) e' maggiore del raggio di evitamento."""
+    r, c = int(entita["y"] // dim_bucket), int(entita["x"] // dim_bucket)
+    vicini = []
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            vicini.extend(griglia_spaziale.get((r + dr, c + dc), ()))
+    return vicini
+
 def repulsione_vicini(entita, vicini, range_evitamento_quad):
     """Vettore di spinta continua lontano dai vicini entro il raggio di evitamento: piu' vicino = spinta piu'
     forte, in modo proporzionale (non un blocco secco a scatti). Chi ha priorita' minore viene spinto con piu'
@@ -400,6 +433,12 @@ def main():
     chiedendo_password = False
     input_password = ""
     errore_timer = 0
+    menu_salvataggio_aperto = False  # F5: prima si sceglie lo slot, poi si chiede la password
+    menu_caricamento_aperto = False  # F9: si sceglie lo slot da caricare
+    slot_da_salvare = None
+    slot_vuoto_timer = 0
+    modalita_rettangolo = False  # M: in attesa del primo/secondo click per riempire un'area rettangolare
+    primo_punto_rettangolo = None
     
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
@@ -446,6 +485,8 @@ def main():
     input_numero_gruppi = ""
     raggio_sicurezza = RAGGIO_SICUREZZA_DEFAULT
     trascinando_raggio = False
+    raggio_robot = RAGGIO_ROBOT_DEFAULT
+    trascinando_raggio_robot = False
 
     contatore_frame = 0
 
@@ -477,7 +518,7 @@ def main():
                     pygame.draw.rect(screen, GRIGIO, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 300, 325
+        panel_w, panel_h = 300, 400
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
         numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
@@ -485,6 +526,7 @@ def main():
         numero_gruppi_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 170, 70, 30)
         numero_ferme_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 205, 70, 30)
         slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 275, panel_w - 30, 8)
+        slider_robot_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 350, panel_w - 30, 8)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -493,7 +535,29 @@ def main():
             if event.type == pygame.VIDEORESIZE and not fullscreen:
                 screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
 
-            if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.type == pygame.MOUSEBUTTONDOWN and modalita_rettangolo:
+                if event.button == 1:
+                    mx, my = t_m(event.pos[0], event.pos[1])
+                    r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
+                    r = max(1, min(Y_TOT - 2, r))
+                    c = max(1, min(X_TOT - 2, c))
+                    if primo_punto_rettangolo is None:
+                        primo_punto_rettangolo = (r, c)
+                    else:
+                        r1, c1 = primo_punto_rettangolo
+                        r_min, r_max = min(r1, r), max(r1, r)
+                        c_min, c_max = min(c1, c), max(c1, c)
+                        # il tipo del primo punto cliccato decide il riempimento di tutto il rettangolo:
+                        # se era un muro lo svuota, se era libero lo riempie di muri (come il toggle di W,
+                        # ma applicato in blocco invece che cella per cella)
+                        nuovo_tipo = "libero" if griglia[r1][c1].tipo == "muro" else "muro"
+                        for rr in range(r_min, r_max + 1):
+                            for cc in range(c_min, c_max + 1):
+                                griglia[rr][cc].tipo = nuovo_tipo
+                        modalita_rettangolo = False
+                        primo_punto_rettangolo = None
+
+            if event.type == pygame.MOUSEBUTTONDOWN and not modalita_rettangolo:
                 if event.button == 1 and modificando_persone and not numero_box_rect.collidepoint(event.pos):
                     modificando_persone = False  # click fuori dal campo: annulla la modifica
                 if event.button == 1 and modificando_corridori and not numero_corridori_box_rect.collidepoint(event.pos):
@@ -524,6 +588,10 @@ def main():
                         trascinando_raggio = True
                         rel = (event.pos[0] - slider_sicurezza_rect.x) / slider_sicurezza_rect.width
                         raggio_sicurezza = RAGGIO_SICUREZZA_MIN + max(0, min(1, rel)) * (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
+                    elif slider_robot_rect.inflate(0, 20).collidepoint(event.pos):
+                        trascinando_raggio_robot = True
+                        rel = (event.pos[0] - slider_robot_rect.x) / slider_robot_rect.width
+                        raggio_robot = RAGGIO_ROBOT_MIN + max(0, min(1, rel)) * (RAGGIO_ROBOT_MAX - RAGGIO_ROBOT_MIN)
                 elif event.button == 4: zoom *= 1.1 # Zoom In
                 elif event.button == 5: zoom /= 1.1 # Zoom Out
                 elif event.button == 3: # Inizio Pan
@@ -541,6 +609,7 @@ def main():
                 if event.button == 1:
                     trascinando_slider = False
                     trascinando_raggio = False
+                    trascinando_raggio_robot = False
 
             if event.type == pygame.MOUSEMOTION:
                 if trascinando_slider:
@@ -550,6 +619,10 @@ def main():
                 if trascinando_raggio:
                     rel = (event.pos[0] - slider_sicurezza_rect.x) / slider_sicurezza_rect.width
                     raggio_sicurezza = RAGGIO_SICUREZZA_MIN + max(0, min(1, rel)) * (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
+                    continue
+                if trascinando_raggio_robot:
+                    rel = (event.pos[0] - slider_robot_rect.x) / slider_robot_rect.width
+                    raggio_robot = RAGGIO_ROBOT_MIN + max(0, min(1, rel)) * (RAGGIO_ROBOT_MAX - RAGGIO_ROBOT_MIN)
                     continue
 
                 # Gestione Panning
@@ -585,7 +658,7 @@ def main():
                 if chiedendo_password:
                     if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
                         if input_password == PASSWORD_SALVATAGGIO:
-                            salva_mappa(griglia, FILE_MAPPA)
+                            salva_mappa(griglia, FILE_MAPPA_SLOT[slot_da_salvare])
                             chiedendo_password = False
                         else:
                             errore_timer = 90
@@ -595,6 +668,41 @@ def main():
                         input_password = ""
                     elif event.key == pygame.K_BACKSPACE:
                         input_password = input_password[:-1]
+                    continue
+
+                if menu_salvataggio_aperto or menu_caricamento_aperto:
+                    indice_slot = {
+                        pygame.K_1: 0, pygame.K_KP1: 0,
+                        pygame.K_2: 1, pygame.K_KP2: 1,
+                        pygame.K_3: 2, pygame.K_KP3: 2,
+                    }.get(event.key)
+                    if indice_slot is not None:
+                        if menu_salvataggio_aperto:
+                            # lo slot si sceglie subito, la password viene chiesta solo dopo (F5 la richiede comunque)
+                            slot_da_salvare = indice_slot
+                            menu_salvataggio_aperto = False
+                            chiedendo_password = True
+                            input_password = ""
+                        else:
+                            if os.path.exists(FILE_MAPPA_SLOT[indice_slot]):
+                                if carica_mappa(griglia, FILE_MAPPA_SLOT[indice_slot]):
+                                    target_pos, percorso = None, []
+                                    persone = [crea_persona(griglia) for _ in range(numero_persone)]
+                                    corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
+                                    persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
+                                    gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
+                                    # la mappa nuova puo' avere un muro dove si trovava il robot: lo
+                                    # ricolloca in una casella libera invece di lasciarlo incastrato
+                                    r_robot, c_robot = int(robot_y // DIM_NODO), int(robot_x // DIM_NODO)
+                                    if not (0 <= r_robot < Y_TOT and 0 <= c_robot < X_TOT) or griglia[r_robot][c_robot].tipo == "muro":
+                                        nodo_robot = cella_libera_casuale(griglia)
+                                        robot_x, robot_y = nodo_robot.cx, nodo_robot.cy
+                                menu_caricamento_aperto = False
+                            else:
+                                slot_vuoto_timer = 90  # slot senza mappa salvata: lampeggia un avviso, il menu resta aperto
+                    elif event.key == pygame.K_ESCAPE:
+                        menu_salvataggio_aperto = False
+                        menu_caricamento_aperto = False
                     continue
 
                 if modificando_persone:
@@ -662,16 +770,17 @@ def main():
                     target_pos, percorso = None, []
                 if event.key == pygame.K_s: target_pos, percorso = None, []
 
+                if event.key == pygame.K_m:
+                    modalita_rettangolo = True
+                    primo_punto_rettangolo = None
+                if event.key == pygame.K_ESCAPE and modalita_rettangolo:
+                    modalita_rettangolo = False
+                    primo_punto_rettangolo = None
+
                 if event.key == pygame.K_F5:
-                    chiedendo_password = True
-                    input_password = ""
+                    menu_salvataggio_aperto = True
                 if event.key == pygame.K_F9:
-                    if carica_mappa(griglia, FILE_MAPPA):
-                        target_pos, percorso = None, []
-                        persone = [crea_persona(griglia) for _ in range(numero_persone)]
-                        corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
-                        persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
-                        gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
+                    menu_caricamento_aperto = True
 
                 if event.key == pygame.K_TAB:
                     pannello_aperto = not pannello_aperto
@@ -716,17 +825,24 @@ def main():
 
         # 3b. Movimento persone, corridori e membri dei gruppi (stessa logica per tutti, cambia solo la velocita')
         range_evitamento_quad = RANGE_EVITAMENTO_PERSONE ** 2
+        range_evitamento_robot = raggio_robot + DIM_NODO // 3  # raggio robot (regolabile) + raggio persona: i corpi non si sovrappongono mai
+        # bucket spaziali per trovare i vicini di ciascuna entita' senza confrontarla con tutte le altre
+        # (O(n) invece di O(n^2)): fondamentale con centinaia di persone in scena
+        griglia_spaziale = costruisci_griglia_spaziale(tutte_mobili, DIM_NODO)
+        # cella occupata da qualunque entita' (mobile, ferma o il robot): calcolata una sola volta per frame
+        # (non per persona) e usata come penalita' di costo comune nell'A* di tutti - il costo di ricalcolarla
+        # per ciascuna persona scalava male col numero di persone; la stessa cella "occupata da se stessi" non
+        # cambia il percorso (il nodo di partenza non viene mai rivisitato da un A* corretto)
+        celle_bloccate_comune = {
+            (int(p2["y"] // DIM_NODO), int(p2["x"] // DIM_NODO)) for p2 in tutte_mobili
+        }
+        celle_bloccate_comune |= celle_persone_ferme
+        celle_bloccate_comune.add((int(robot_y // DIM_NODO), int(robot_x // DIM_NODO)))
         for p in tutte_mobili:
             if p["stato"] == "movimento":
                 tempo_di_ricalcolare_questa_persona = (contatore_frame + p["offset_ricalcolo"]) % INTERVALLO_RICALCOLO_PERSONE_FRAME == 0
                 if not p["percorso"] or tempo_di_ricalcolare_questa_persona:
-                    celle_bloccate = {
-                        (int(p2["y"] // DIM_NODO), int(p2["x"] // DIM_NODO))
-                        for p2 in tutte_mobili if p2 is not p
-                    }
-                    celle_bloccate |= celle_persone_ferme
-                    celle_bloccate.add((int(robot_y // DIM_NODO), int(robot_x // DIM_NODO)))
-                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"], celle_bloccate=celle_bloccate)
+                    p["percorso"] = algoritmo_a_star(griglia, (p["x"], p["y"]), p["target"], rumore_seed=p["rumore_seed"], celle_bloccate=celle_bloccate_comune)
                 nodo_target_p = griglia[p["target"][0]][p["target"][1]]
                 velocita_p = VELOCITA_PERSONA * moltiplicatore_velocita * p["fattore_velocita"]
                 non_capofila = "gruppo" in p and not p.get("capofila")
@@ -748,12 +864,12 @@ def main():
                     p["percorso"] = []  # il passo tagliava un muro: ricalcola subito invece di aspettare il prossimo intervallo
 
                 # scarto continuo e proporzionale per non trapassare le altre persone vicine (niente blocchi a scatti)
-                rep_x, rep_y = repulsione_vicini(p, tutte_mobili, range_evitamento_quad)
+                rep_x, rep_y = repulsione_vicini(p, vicini_spaziali(p, griglia_spaziale, DIM_NODO), range_evitamento_quad)
                 p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rep_x, rep_y, FORZA_REPULSIONE_PERSONE, griglia)
 
                 # il robot e' un ostacolo fisico: le persone possono avvicinarsi ed entrare nella sua zona di
                 # sicurezza (che riguarda solo il robot, non loro), ma non compenetrare il suo corpo - lo aggirano
-                rrep_x, rrep_y = repulsione_punto(p, robot_x, robot_y, RANGE_EVITAMENTO_ROBOT)
+                rrep_x, rrep_y = repulsione_punto(p, robot_x, robot_y, range_evitamento_robot)
                 p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rrep_x, rrep_y, FORZA_REPULSIONE_ROBOT, griglia)
 
                 if non_capofila:
@@ -795,10 +911,10 @@ def main():
             elif p["stato"] == "attesa":
                 # anche da ferme mantengono un minimo di distanza dalle altre persone vicine (come se si
                 # fossero fermate a parlare a distanza naturale, non ammassate tutte sullo stesso punto)
-                rep_x, rep_y = repulsione_vicini(p, tutte_mobili, range_evitamento_quad)
+                rep_x, rep_y = repulsione_vicini(p, vicini_spaziali(p, griglia_spaziale, DIM_NODO), range_evitamento_quad)
                 p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rep_x, rep_y, FORZA_REPULSIONE_PERSONE, griglia)
 
-                rrep_x, rrep_y = repulsione_punto(p, robot_x, robot_y, RANGE_EVITAMENTO_ROBOT)
+                rrep_x, rrep_y = repulsione_punto(p, robot_x, robot_y, range_evitamento_robot)
                 p["x"], p["y"] = sposta_con_vettore(p["x"], p["y"], rrep_x, rrep_y, FORZA_REPULSIONE_ROBOT, griglia)
 
                 p["attesa_timer"] -= 1
@@ -840,10 +956,22 @@ def main():
             pygame.draw.circle(zona_surf, (255, 0, 0, ALPHA_ZONA_SICUREZZA), (raggio_px, raggio_px), raggio_px)
             screen.blit(zona_surf, (rx - raggio_px, ry - raggio_px))
 
-        pygame.draw.circle(screen, BLU, (rx, ry), int(RAGGIO_ROBOT_PX * zoom))
+        pygame.draw.circle(screen, BLU, (rx, ry), int(raggio_robot * zoom))
         if target_pos:
             tx, ty = t_s(target_pos[1]*DIM_NODO + DIM_NODO//2, target_pos[0]*DIM_NODO + DIM_NODO//2)
             pygame.draw.circle(screen, ROSSO, (tx, ty), int((DIM_NODO//4) * zoom), 2)
+
+        if modalita_rettangolo and primo_punto_rettangolo:
+            r1, c1 = primo_punto_rettangolo
+            mx, my = pygame.mouse.get_pos()
+            mgx, mgy = t_m(mx, my)
+            r2 = max(1, min(Y_TOT - 2, int(mgy // DIM_NODO)))
+            c2 = max(1, min(X_TOT - 2, int(mgx // DIM_NODO)))
+            r_min, r_max = min(r1, r2), max(r1, r2)
+            c_min, c_max = min(c1, c2), max(c1, c2)
+            sx, sy = t_s(c_min * DIM_NODO, r_min * DIM_NODO)
+            ex, ey = t_s((c_max + 1) * DIM_NODO, (r_max + 1) * DIM_NODO)
+            pygame.draw.rect(screen, ROSSO, (sx, sy, ex - sx, ey - sy), 2)
 
         for p in tutte_mobili:
             px, py = t_s(p["x"], p["y"])
@@ -859,6 +987,11 @@ def main():
             for m in g["membri"]:
                 mpx, mpy = t_s(m["x"], m["y"])
                 pygame.draw.circle(screen, ARANCIONE, (mpx, mpy), int((DIM_NODO//3) * zoom))
+
+        if modalita_rettangolo:
+            msg = "Clicca il secondo punto (Esc annulla)" if primo_punto_rettangolo else "Clicca il primo punto (Esc annulla)"
+            aiuto_txt = font.render(msg, True, ROSSO)
+            screen.blit(aiuto_txt, (10, 10))
 
         # 5. Overlay richiesta password (salvataggio F5)
         if errore_timer > 0:
@@ -880,6 +1013,28 @@ def main():
             if errore_timer > 0:
                 errore_txt = font.render("Password errata", True, ROSSO)
                 screen.blit(errore_txt, (box_x + 15, box_y + 85))
+
+        # 5b. Overlay menu slot mappa (F5 salva / F9 carica)
+        if slot_vuoto_timer > 0:
+            slot_vuoto_timer -= 1
+        if menu_salvataggio_aperto or menu_caricamento_aperto:
+            box_slot_w, box_slot_h = 360, 210
+            box_slot_x = (screen.get_width() - box_slot_w) // 2
+            box_slot_y = (screen.get_height() - box_slot_h) // 2
+            pygame.draw.rect(screen, BIANCO, (box_slot_x, box_slot_y, box_slot_w, box_slot_h))
+            pygame.draw.rect(screen, NERO, (box_slot_x, box_slot_y, box_slot_w, box_slot_h), 2)
+
+            titolo_slot = font.render("Esc annulla", True, NERO)
+            screen.blit(titolo_slot, (box_slot_x + 15, box_slot_y + 15))
+
+            for i, path in enumerate(FILE_MAPPA_SLOT):
+                stato = "occupato" if os.path.exists(path) else "vuoto"
+                riga_slot = font.render(f"{i + 1}. {os.path.basename(path)} - {stato}", True, NERO)
+                screen.blit(riga_slot, (box_slot_x + 15, box_slot_y + 55 + i * 40))
+
+            if menu_caricamento_aperto and slot_vuoto_timer > 0:
+                avviso_slot = font.render("Slot vuoto: nessuna mappa da caricare", True, ROSSO)
+                screen.blit(avviso_slot, (box_slot_x + 15, box_slot_y + box_slot_h - 30))
 
         # 6. Pannello tecnico (TAB per aprire/chiudere)
         if pannello_aperto:
@@ -940,6 +1095,14 @@ def main():
             rel_sic = (raggio_sicurezza - RAGGIO_SICUREZZA_MIN) / (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
             handle_sic_x = slider_sicurezza_rect.x + int(rel_sic * slider_sicurezza_rect.width)
             pygame.draw.circle(screen, ROSSO, (handle_sic_x, slider_sicurezza_rect.centery), 9)
+
+            robot_txt = font.render(f"Dimensione robot: {int(raggio_robot)}px", True, NERO)
+            screen.blit(robot_txt, (panel_rect.x + 15, panel_rect.y + 320))
+
+            pygame.draw.rect(screen, GRIGIO, slider_robot_rect)
+            rel_robot = (raggio_robot - RAGGIO_ROBOT_MIN) / (RAGGIO_ROBOT_MAX - RAGGIO_ROBOT_MIN)
+            handle_robot_x = slider_robot_rect.x + int(rel_robot * slider_robot_rect.width)
+            pygame.draw.circle(screen, BLU, (handle_robot_x, slider_robot_rect.centery), 9)
 
         pygame.display.flip()
         clock.tick(60)
