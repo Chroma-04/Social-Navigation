@@ -62,6 +62,16 @@ RAGGIO_LIDAR_MIN, RAGGIO_LIDAR_MAX = 0, DIM_NODO * 10
 RAGGIO_LIDAR_DEFAULT = DIM_NODO * 4  # raggio di rilevamento del "lidar" simulato del robot
 RUMORE_LIDAR_PX = 8  # px massimi di rumore casuale sulla posizione percepita di una persona rilevata
 ALPHA_ZONA_LIDAR = 35  # trasparenza del cerchio del lidar (0-255), piu' tenue della zona di sicurezza
+KALMAN_RUMORE_MISURA = (RUMORE_LIDAR_PX / 2) ** 2  # varianza di misura: quanto ci si fida di una singola posizione percepita
+KALMAN_RUMORE_PROCESSO = 0.05  # varianza aggiunta alla velocita' stimata ad ogni frame (quanto puo' cambiare "di suo")
+KALMAN_INCERTEZZA_INIZIALE_POS = 50.0 ** 2  # varianza di posizione iniziale per una traccia appena avvistata
+KALMAN_INCERTEZZA_INIZIALE_VEL = 5.0 ** 2  # varianza di velocita' iniziale per una traccia appena avvistata
+PREVISIONE_BLOB_FRAME = 60  # quanti frame nel futuro si proietta il centro della macchia (60 = 1s)
+RAGGIO_BLOB_CELLE = 6  # raggio massimo (in celle) della diffusione della macchia di probabilita'
+DECADIMENTO_BLOB = 0.75  # fattore di decadimento del peso per ogni passo di diffusione attraverso lo spazio libero
+COSTO_MASSIMO_PROBABILITA = COSTO_CELLA_OCCUPATA * 0.5  # costo extra A* al centro della macchia (peso 1.0): piu' morbido del blocco per rilevamento diretto
+COLORE_BLOB_PROBABILITA = (40, 130, 255)
+ALPHA_MAX_BLOB = 140  # trasparenza massima (al centro della macchia) del rendering termico
 FATTORE_VELOCITA_MEDIA = 1.0    # media della gaussiana (1.0 = velocita' base)
 FATTORE_VELOCITA_DEV_STD = 0.25  # deviazione standard: la maggior parte cammina, code = passeggiano/corrono
 FATTORE_VELOCITA_MIN, FATTORE_VELOCITA_MAX = 0.4, 2.5  # limiti per evitare fermi o assurdamente veloci
@@ -92,7 +102,7 @@ class Nodo:
         self.g = self.h = self.f = 0
         self.genitore = None
 
-def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None, celle_bloccate=None):
+def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None, celle_bloccate=None, mappa_costo_extra=None):
     c_inizio = int(inizio_pos_pixel[0] // DIM_NODO)
     r_inizio = int(inizio_pos_pixel[1] // DIM_NODO)
     r_fine, c_fine = fine_pos_griglia
@@ -152,6 +162,11 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
                     # ma se quella cella occupata e' l'unico passaggio (es. una porta larga 1 cella) la
                     # attraversa comunque invece di restituire un percorso vuoto e restare bloccata per sempre
                     dist += COSTO_CELLA_OCCUPATA
+                if mappa_costo_extra:
+                    # costo morbido e graduale (es. la macchia di probabilita' del lidar predittivo del
+                    # robot): a differenza di celle_bloccate non e' un blocco secco, il peso varia da
+                    # cella a cella invece di essere lo stesso ovunque
+                    dist += mappa_costo_extra.get((r, c), 0.0)
                 nuovo_g = attuale.g + dist
                 if vicino not in in_open or nuovo_g < in_open[vicino]:
                     vicino.g = nuovo_g
@@ -391,6 +406,80 @@ def colore_rilevamento(px, py, robot_x, robot_y, raggio_lidar, raggio_sicurezza,
         return ARANCIONE
     return VERDE
 
+def kalman_predict_asse(pos, vel, pxx, pxv, pvv, dt=1.0):
+    """Passo di previsione di un filtro di Kalman 1D a velocita' costante (stato: posizione, velocita').
+    Usato due volte indipendentemente (asse x e asse y) invece di un vero filtro 2D: gli assi non sono
+    correlati in questo modello, quindi la semplificazione non perde precisione ed evita l'algebra
+    matriciale. La covarianza cresce ad ogni passo (piu' incertezza piu' si proietta lontano nel futuro)."""
+    pos_n = pos + vel * dt
+    vel_n = vel
+    pxx_n = pxx + 2 * dt * pxv + dt * dt * pvv
+    pxv_n = pxv + dt * pvv
+    pvv_n = pvv + KALMAN_RUMORE_PROCESSO
+    return pos_n, vel_n, pxx_n, pxv_n, pvv_n
+
+def kalman_update_asse(pos, vel, pxx, pxv, pvv, misura):
+    """Passo di correzione: integra una nuova posizione misurata (rumorosa) riducendo l'incertezza,
+    con un peso (guadagno di Kalman) proporzionale a quanto ci si fida della stima attuale rispetto
+    al rumore di misura KALMAN_RUMORE_MISURA."""
+    innovazione = misura - pos
+    s = pxx + KALMAN_RUMORE_MISURA
+    kx = pxx / s
+    kv = pxv / s
+    pos_n = pos + kx * innovazione
+    vel_n = vel + kv * innovazione
+    pxx_n = (1 - kx) * pxx
+    pxv_n = (1 - kx) * pxv
+    pvv_n = pvv - kv * pxv
+    return pos_n, vel_n, pxx_n, pxv_n, pvv_n
+
+def nuova_traccia_kalman(x, y):
+    return {
+        "x": x, "vx": 0.0, "pxx": KALMAN_INCERTEZZA_INIZIALE_POS, "pxv": 0.0, "pvv_x": KALMAN_INCERTEZZA_INIZIALE_VEL,
+        "y": y, "vy": 0.0, "pyy": KALMAN_INCERTEZZA_INIZIALE_POS, "pyv": 0.0, "pvv_y": KALMAN_INCERTEZZA_INIZIALE_VEL,
+    }
+
+def aggiorna_traccia_kalman(traccia, x_misurato, y_misurato):
+    """Un passo predici+correggi per frame, sui due assi indipendenti."""
+    traccia["x"], traccia["vx"], traccia["pxx"], traccia["pxv"], traccia["pvv_x"] = kalman_predict_asse(
+        traccia["x"], traccia["vx"], traccia["pxx"], traccia["pxv"], traccia["pvv_x"])
+    traccia["x"], traccia["vx"], traccia["pxx"], traccia["pxv"], traccia["pvv_x"] = kalman_update_asse(
+        traccia["x"], traccia["vx"], traccia["pxx"], traccia["pxv"], traccia["pvv_x"], x_misurato)
+    traccia["y"], traccia["vy"], traccia["pyy"], traccia["pyv"], traccia["pvv_y"] = kalman_predict_asse(
+        traccia["y"], traccia["vy"], traccia["pyy"], traccia["pyv"], traccia["pvv_y"])
+    traccia["y"], traccia["vy"], traccia["pyy"], traccia["pyv"], traccia["pvv_y"] = kalman_update_asse(
+        traccia["y"], traccia["vy"], traccia["pyy"], traccia["pyv"], traccia["pvv_y"], y_misurato)
+
+def previsione_posizione_kalman(traccia, frame_futuri):
+    """Proietta in avanti (sola previsione, senza nuove misure) la posizione stimata di 'frame_futuri'
+    frame: e' il centro su cui viene fatta partire la macchia di probabilita'."""
+    return traccia["x"] + traccia["vx"] * frame_futuri, traccia["y"] + traccia["vy"] * frame_futuri
+
+def macchia_diffusione(griglia, r_centro, c_centro, raggio_celle, decadimento):
+    """Espande un peso (1.0 al centro) attraverso lo spazio libero a partire dalla cella centrale (BFS
+    a 4 direzioni): i muri bloccano il flusso, quindi la macchia si piega attorno agli angoli e si
+    stringe nelle porte invece di attraversare i muri in linea retta come farebbe una gaussiana pura."""
+    if not (0 <= r_centro < Y_TOT and 0 <= c_centro < X_TOT) or griglia[r_centro][c_centro].tipo == "muro":
+        return {}
+    pesi = {(r_centro, c_centro): 1.0}
+    frontiera = [(r_centro, c_centro, 1.0)]
+    passi = 0
+    while frontiera and passi < raggio_celle:
+        nuova_frontiera = []
+        for r, c, peso in frontiera:
+            peso_vicino = peso * decadimento
+            if peso_vicino < 0.02:
+                continue
+            for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                rv, cv = r + dr, c + dc
+                if 0 <= rv < Y_TOT and 0 <= cv < X_TOT and griglia[rv][cv].tipo != "muro":
+                    if (rv, cv) not in pesi or pesi[(rv, cv)] < peso_vicino:
+                        pesi[(rv, cv)] = peso_vicino
+                        nuova_frontiera.append((rv, cv, peso_vicino))
+        frontiera = nuova_frontiera
+        passi += 1
+    return pesi
+
 def sposta_con_vettore(x, y, vx, vy, forza, griglia):
     """Applica lo spostamento (vx, vy) * forza (repulsione o attrazione), senza attraversare muri."""
     if vx == 0 and vy == 0:
@@ -494,6 +583,8 @@ def main():
     target_pos = None
     percorso = []
     celle_rilevate_precedenti = set()  # posizioni (vere, senza rumore) rilevate dal lidar nel frame precedente
+    tracciamento_lidar = {}  # id(persona) -> traccia Kalman, solo per le persone attualmente rilevate dal lidar
+    mappa_pesi_render = {}  # ultima macchia di probabilita' calcolata (per cella, peso 0-1): persiste fra un ricalcolo e l'altro per il disegno
 
     # --- PERSONE ---
     numero_persone = NUMERO_PERSONE_DEFAULT
@@ -889,6 +980,7 @@ def main():
         tutte_le_persone = tutte_mobili + persone_ferme + [m for g in gruppi if not g["mobile"] for m in g["membri"]]
         celle_rilevate = set()
         celle_rilevate_rumorose = set()
+        id_rilevati_ora = set()
         for p in tutte_le_persone:
             d = math.hypot(p["x"] - robot_x, p["y"] - robot_y)
             if raggio_lidar > 0 and d < raggio_lidar and linea_di_vista_libera(griglia, robot_x, robot_y, p["x"], p["y"]):
@@ -901,13 +993,41 @@ def main():
                 c_rum = max(0, min(X_TOT - 1, int(xr // DIM_NODO)))
                 celle_rilevate_rumorose.add((r_rum, c_rum))
 
+                # traccia Kalman: SOLO per le persone attualmente rilevate (mai per tutta la
+                # popolazione), altrimenti con centinaia di persone il costo esploderebbe
+                pid = id(p)
+                id_rilevati_ora.add(pid)
+                if pid not in tracciamento_lidar:
+                    tracciamento_lidar[pid] = nuova_traccia_kalman(xr, yr)
+                else:
+                    aggiorna_traccia_kalman(tracciamento_lidar[pid], xr, yr)
+
+        # le tracce di persone non piu' rilevate (uscite dal raggio o nascoste da un muro) vengono
+        # abbandonate subito, nessun "coasting": coerente con "il robot ragiona solo su cio' che percepisce"
+        for pid_vecchio in list(tracciamento_lidar.keys()):
+            if pid_vecchio not in id_rilevati_ora:
+                del tracciamento_lidar[pid_vecchio]
+
         if celle_rilevate != celle_rilevate_precedenti:
             percorso = []  # e' cambiato l'insieme di persone rilevate: il percorso pianificato potrebbe non essere piu' valido
         celle_rilevate_precedenti = celle_rilevate
 
         if target_pos and not robot_bloccato:
             if not percorso or tempo_di_ricalcolare_robot:
-                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_rilevate_rumorose)
+                # macchia di probabilita': solo qui (al ricalcolo, non ogni frame) si proietta in avanti
+                # ogni traccia rilevata e si fa diffondere il suo peso attraverso lo spazio libero, cosi'
+                # il costo extra e' morbido (decresce dal centro previsto) invece del blocco secco usato
+                # per la posizione rilevata adesso
+                mappa_pesi_render = {}
+                for traccia in tracciamento_lidar.values():
+                    x_prev, y_prev = previsione_posizione_kalman(traccia, PREVISIONE_BLOB_FRAME)
+                    r_prev = max(0, min(Y_TOT - 1, int(y_prev // DIM_NODO)))
+                    c_prev = max(0, min(X_TOT - 1, int(x_prev // DIM_NODO)))
+                    for cella, peso in macchia_diffusione(griglia, r_prev, c_prev, RAGGIO_BLOB_CELLE, DECADIMENTO_BLOB).items():
+                        if cella not in mappa_pesi_render or mappa_pesi_render[cella] < peso:
+                            mappa_pesi_render[cella] = peso
+                mappa_costo_probabilita = {cella: peso * COSTO_MASSIMO_PROBABILITA for cella, peso in mappa_pesi_render.items()}
+                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_probabilita)
             meta_nodo = griglia[target_pos[0]][target_pos[1]]
             robot_x, robot_y, arrivato, passo_muro = passo_movimento(robot_x, robot_y, percorso, VELOCITA_ROBOT * moltiplicatore_velocita, meta_nodo, griglia)
             if passo_muro:
@@ -1044,6 +1164,17 @@ def main():
         if percorso and len(percorso) > 1:
             punti = [t_s(n.cx, n.cy) for n in percorso]
             pygame.draw.lines(screen, ROSSO, False, punti, 2)
+
+        # macchie di probabilita' (previsione lidar): solo per le celle con un peso calcolato, mai su
+        # tutta la griglia - tonalita' termica blu, piu' opaco al centro della macchia
+        for (r_b, c_b), peso in mappa_pesi_render.items():
+            sx, sy = t_s(c_b * DIM_NODO, r_b * DIM_NODO)
+            ex, ey = t_s((c_b + 1) * DIM_NODO, (r_b + 1) * DIM_NODO)
+            larghezza, altezza = max(1, ex - sx), max(1, ey - sy)
+            blob_surf = pygame.Surface((larghezza, altezza), pygame.SRCALPHA)
+            alpha = int(min(255, peso * ALPHA_MAX_BLOB))
+            blob_surf.fill((*COLORE_BLOB_PROBABILITA, alpha))
+            screen.blit(blob_surf, (sx, sy))
 
         rx, ry = t_s(robot_x, robot_y)
 
