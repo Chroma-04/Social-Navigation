@@ -56,6 +56,10 @@ ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
 RAGGIO_ROBOT_MIN, RAGGIO_ROBOT_MAX = 5, int(DIM_NODO * 1.5)
 RAGGIO_ROBOT_DEFAULT = DIM_NODO // 3  # raggio "fisico" del robot (lo stesso con cui viene disegnato di default)
 FORZA_REPULSIONE_ROBOT = 1.3  # px/frame massimi di spinta continua lontano dal robot (a distanza 0)
+RAGGIO_LIDAR_MIN, RAGGIO_LIDAR_MAX = 0, DIM_NODO * 10
+RAGGIO_LIDAR_DEFAULT = DIM_NODO * 4  # raggio di rilevamento del "lidar" simulato del robot
+RUMORE_LIDAR_PX = 8  # px massimi di rumore casuale sulla posizione percepita di una persona rilevata
+ALPHA_ZONA_LIDAR = 35  # trasparenza del cerchio del lidar (0-255), piu' tenue della zona di sicurezza
 FATTORE_VELOCITA_MEDIA = 1.0    # media della gaussiana (1.0 = velocita' base)
 FATTORE_VELOCITA_DEV_STD = 0.25  # deviazione standard: la maggior parte cammina, code = passeggiano/corrono
 FATTORE_VELOCITA_MIN, FATTORE_VELOCITA_MAX = 0.4, 2.5  # limiti per evitare fermi o assurdamente veloci
@@ -65,8 +69,12 @@ RUMORE_PERCORSO_PERSONA = 15  # quanto i percorsi delle persone si discostano da
 BIANCO, GRIGIO = (255, 255, 255), (210, 210, 210)
 ROSSO, BLU = (255, 0, 0), (0, 100, 255)
 ARANCIONE = (240, 140, 0)
+VERDE = (30, 160, 60)  # persone non rilevate dal lidar del robot (fuori dal suo raggio d'azione)
 NERO = (30, 30, 30)
 GRIGIO_SCURO = (90, 90, 90)
+GRIGIO_PAVIMENTO = (195, 195, 195)  # sfondo della mappa
+GRIGIO_BORDO_CELLA = (182, 182, 182)  # bordo delle celle libere, un pochino piu' scuro dello sfondo
+COLORE_LIDAR = (0, 120, 220)
 
 class Nodo:
     def __init__(self, r, c):
@@ -353,6 +361,34 @@ def repulsione_punto(entita, px, py, raggio):
         return (dx / d) * peso, (dy / d) * peso
     return 0.0, 0.0
 
+def linea_di_vista_libera(griglia, x1, y1, x2, y2):
+    """True se il segmento fra i due punti non attraversa nessuna cella muro: simula l'occlusione del
+    lidar del robot (non rileva una persona nascosta dietro una parete). Campiona il segmento a passi
+    piu' fitti della dimensione di una cella, cosi' non puo' saltare un muro sottile una cella."""
+    dist = math.hypot(x2 - x1, y2 - y1)
+    if dist == 0:
+        return True
+    passi = max(1, int(dist / (DIM_NODO / 4)))
+    for i in range(passi + 1):
+        t = i / passi
+        x, y = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+        r, c = int(y // DIM_NODO), int(x // DIM_NODO)
+        if 0 <= r < Y_TOT and 0 <= c < X_TOT and griglia[r][c].tipo == "muro":
+            return False
+    return True
+
+def colore_rilevamento(px, py, robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia):
+    """Colore di una persona in base alla distanza dal robot: verde se fuori dal raggio del lidar o
+    nascosta da un muro (non rilevata), arancione se rilevata dal lidar, rosso se dentro la zona di
+    sicurezza del robot (la zona di sicurezza e' un limite fisico, non un rilevamento: resta attiva
+    anche dietro un muro sottile, per prudenza)."""
+    d = math.hypot(px - robot_x, py - robot_y)
+    if raggio_sicurezza > 0 and d < raggio_sicurezza:
+        return ROSSO
+    if raggio_lidar > 0 and d < raggio_lidar and linea_di_vista_libera(griglia, robot_x, robot_y, px, py):
+        return ARANCIONE
+    return VERDE
+
 def sposta_con_vettore(x, y, vx, vy, forza, griglia):
     """Applica lo spostamento (vx, vy) * forza (repulsione o attrazione), senza attraversare muri."""
     if vx == 0 and vy == 0:
@@ -449,11 +485,13 @@ def main():
     trascinando = False
     ultima_pos_mouse = (0, 0)
     ultima_cella_w = None
+    seguendo_robot = False  # F: la telecamera segue il robot, F di nuovo per staccarsi
 
     robot_x = 1 * DIM_NODO + DIM_NODO // 2
     robot_y = 1 * DIM_NODO + DIM_NODO // 2
     target_pos = None
     percorso = []
+    celle_rilevate_precedenti = set()  # posizioni (vere, senza rumore) rilevate dal lidar nel frame precedente
 
     # --- PERSONE ---
     numero_persone = NUMERO_PERSONE_DEFAULT
@@ -487,12 +525,14 @@ def main():
     trascinando_raggio = False
     raggio_robot = RAGGIO_ROBOT_DEFAULT
     trascinando_raggio_robot = False
+    raggio_lidar = RAGGIO_LIDAR_DEFAULT
+    trascinando_raggio_lidar = False
 
     contatore_frame = 0
 
     running = True
     while running:
-        screen.fill(BIANCO)
+        screen.fill(GRIGIO_PAVIMENTO)
         
         # Funzioni di conversione coordinate
         def t_s(x, y): return int(x * zoom + offset_x), int(y * zoom + offset_y)
@@ -515,10 +555,10 @@ def main():
                 if n.tipo == "muro":
                     pygame.draw.rect(screen, NERO, rect)
                 else:
-                    pygame.draw.rect(screen, GRIGIO, rect, 1)
+                    pygame.draw.rect(screen, GRIGIO_BORDO_CELLA, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 300, 400
+        panel_w, panel_h = 300, 475
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
         numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
@@ -527,6 +567,7 @@ def main():
         numero_ferme_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 205, 70, 30)
         slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 275, panel_w - 30, 8)
         slider_robot_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 350, panel_w - 30, 8)
+        slider_lidar_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 425, panel_w - 30, 8)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -592,6 +633,10 @@ def main():
                         trascinando_raggio_robot = True
                         rel = (event.pos[0] - slider_robot_rect.x) / slider_robot_rect.width
                         raggio_robot = RAGGIO_ROBOT_MIN + max(0, min(1, rel)) * (RAGGIO_ROBOT_MAX - RAGGIO_ROBOT_MIN)
+                    elif slider_lidar_rect.inflate(0, 20).collidepoint(event.pos):
+                        trascinando_raggio_lidar = True
+                        rel = (event.pos[0] - slider_lidar_rect.x) / slider_lidar_rect.width
+                        raggio_lidar = RAGGIO_LIDAR_MIN + max(0, min(1, rel)) * (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
                 elif event.button == 4: zoom *= 1.1 # Zoom In
                 elif event.button == 5: zoom /= 1.1 # Zoom Out
                 elif event.button == 3: # Inizio Pan
@@ -610,6 +655,7 @@ def main():
                     trascinando_slider = False
                     trascinando_raggio = False
                     trascinando_raggio_robot = False
+                    trascinando_raggio_lidar = False
 
             if event.type == pygame.MOUSEMOTION:
                 if trascinando_slider:
@@ -623,6 +669,10 @@ def main():
                 if trascinando_raggio_robot:
                     rel = (event.pos[0] - slider_robot_rect.x) / slider_robot_rect.width
                     raggio_robot = RAGGIO_ROBOT_MIN + max(0, min(1, rel)) * (RAGGIO_ROBOT_MAX - RAGGIO_ROBOT_MIN)
+                    continue
+                if trascinando_raggio_lidar:
+                    rel = (event.pos[0] - slider_lidar_rect.x) / slider_lidar_rect.width
+                    raggio_lidar = RAGGIO_LIDAR_MIN + max(0, min(1, rel)) * (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
                     continue
 
                 # Gestione Panning
@@ -770,6 +820,9 @@ def main():
                     target_pos, percorso = None, []
                 if event.key == pygame.K_s: target_pos, percorso = None, []
 
+                if event.key == pygame.K_f:
+                    seguendo_robot = not seguendo_robot
+
                 if event.key == pygame.K_m:
                     modalita_rettangolo = True
                     primo_punto_rettangolo = None
@@ -813,9 +866,34 @@ def main():
         celle_persone_ferme = {(pf["r"], pf["c"]) for pf in persone_ferme}
         celle_persone_ferme |= {(m["r"], m["c"]) for g in gruppi if not g["mobile"] for m in g["membri"]}
 
+        # rilevamento "lidar" del robot: la planimetria (muri) la conosce gia' a priori, ma le persone
+        # (in movimento o ferme) diventano ostacoli noti per il suo A* solo entro raggio_lidar. Il
+        # confronto per decidere se serve un ricalcolo usa le celle vere, non quelle rumorose: il rumore
+        # da solo (ricampionato ogni frame) cambierebbe cella a ogni frame anche per una persona immobile,
+        # forzando un ricalcolo continuo inutile. Il rumore si applica solo al costo passato all'A*, per
+        # simulare l'incertezza sulla posizione percepita.
+        tutte_le_persone = tutte_mobili + persone_ferme + [m for g in gruppi if not g["mobile"] for m in g["membri"]]
+        celle_rilevate = set()
+        celle_rilevate_rumorose = set()
+        for p in tutte_le_persone:
+            d = math.hypot(p["x"] - robot_x, p["y"] - robot_y)
+            if raggio_lidar > 0 and d < raggio_lidar and linea_di_vista_libera(griglia, robot_x, robot_y, p["x"], p["y"]):
+                r_vera, c_vera = int(p["y"] // DIM_NODO), int(p["x"] // DIM_NODO)
+                celle_rilevate.add((r_vera, c_vera))
+                angolo_rumore = random.uniform(0, 2 * math.pi)
+                raggio_rumore = random.uniform(0, RUMORE_LIDAR_PX)
+                xr, yr = p["x"] + raggio_rumore * math.cos(angolo_rumore), p["y"] + raggio_rumore * math.sin(angolo_rumore)
+                r_rum = max(0, min(Y_TOT - 1, int(yr // DIM_NODO)))
+                c_rum = max(0, min(X_TOT - 1, int(xr // DIM_NODO)))
+                celle_rilevate_rumorose.add((r_rum, c_rum))
+
+        if celle_rilevate != celle_rilevate_precedenti:
+            percorso = []  # e' cambiato l'insieme di persone rilevate: il percorso pianificato potrebbe non essere piu' valido
+        celle_rilevate_precedenti = celle_rilevate
+
         if target_pos and not robot_bloccato:
             if not percorso or tempo_di_ricalcolare_robot:
-                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_persone_ferme)
+                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_rilevate_rumorose)
             meta_nodo = griglia[target_pos[0]][target_pos[1]]
             robot_x, robot_y, arrivato, passo_muro = passo_movimento(robot_x, robot_y, percorso, VELOCITA_ROBOT * moltiplicatore_velocita, meta_nodo, griglia)
             if passo_muro:
@@ -943,12 +1021,23 @@ def main():
 
         contatore_frame += 1
 
+        if seguendo_robot:
+            offset_x = screen.get_width() / 2 - robot_x * zoom
+            offset_y = screen.get_height() / 2 - robot_y * zoom
+            zoom, offset_x, offset_y = limita_zoom_pan(zoom, offset_x, offset_y, screen.get_width(), screen.get_height())
+
         # 4. Rendering (Invariato)
         if percorso and len(percorso) > 1:
             punti = [t_s(n.cx, n.cy) for n in percorso]
             pygame.draw.lines(screen, ROSSO, False, punti, 2)
 
         rx, ry = t_s(robot_x, robot_y)
+
+        if raggio_lidar > 0:
+            raggio_lidar_px = max(1, int(raggio_lidar * zoom))
+            lidar_surf = pygame.Surface((raggio_lidar_px * 2, raggio_lidar_px * 2), pygame.SRCALPHA)
+            pygame.draw.circle(lidar_surf, (*COLORE_LIDAR, ALPHA_ZONA_LIDAR), (raggio_lidar_px, raggio_lidar_px), raggio_lidar_px)
+            screen.blit(lidar_surf, (rx - raggio_lidar_px, ry - raggio_lidar_px))
 
         if raggio_sicurezza > 0:
             raggio_px = max(1, int(raggio_sicurezza * zoom))
@@ -975,18 +1064,21 @@ def main():
 
         for p in tutte_mobili:
             px, py = t_s(p["x"], p["y"])
-            pygame.draw.circle(screen, ARANCIONE, (px, py), int((DIM_NODO//3) * zoom))
+            colore_p = colore_rilevamento(p["x"], p["y"], robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia)
+            pygame.draw.circle(screen, colore_p, (px, py), int((DIM_NODO//3) * zoom))
 
         for pf in persone_ferme:
             fx, fy = t_s(pf["x"], pf["y"])
-            pygame.draw.circle(screen, ARANCIONE, (fx, fy), int((DIM_NODO//3) * zoom))
+            colore_pf = colore_rilevamento(pf["x"], pf["y"], robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia)
+            pygame.draw.circle(screen, colore_pf, (fx, fy), int((DIM_NODO//3) * zoom))
 
         for g in gruppi:
             if g["mobile"]:
                 continue  # i membri dei gruppi mobili sono gia' disegnati sopra (sono inclusi in tutte_mobili)
             for m in g["membri"]:
                 mpx, mpy = t_s(m["x"], m["y"])
-                pygame.draw.circle(screen, ARANCIONE, (mpx, mpy), int((DIM_NODO//3) * zoom))
+                colore_m = colore_rilevamento(m["x"], m["y"], robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia)
+                pygame.draw.circle(screen, colore_m, (mpx, mpy), int((DIM_NODO//3) * zoom))
 
         if modalita_rettangolo:
             msg = "Clicca il secondo punto (Esc annulla)" if primo_punto_rettangolo else "Clicca il primo punto (Esc annulla)"
@@ -1103,6 +1195,14 @@ def main():
             rel_robot = (raggio_robot - RAGGIO_ROBOT_MIN) / (RAGGIO_ROBOT_MAX - RAGGIO_ROBOT_MIN)
             handle_robot_x = slider_robot_rect.x + int(rel_robot * slider_robot_rect.width)
             pygame.draw.circle(screen, BLU, (handle_robot_x, slider_robot_rect.centery), 9)
+
+            lidar_txt = font.render(f"Raggio lidar: {int(raggio_lidar)}px", True, NERO)
+            screen.blit(lidar_txt, (panel_rect.x + 15, panel_rect.y + 395))
+
+            pygame.draw.rect(screen, GRIGIO, slider_lidar_rect)
+            rel_lidar = (raggio_lidar - RAGGIO_LIDAR_MIN) / (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
+            handle_lidar_x = slider_lidar_rect.x + int(rel_lidar * slider_lidar_rect.width)
+            pygame.draw.circle(screen, COLORE_LIDAR, (handle_lidar_x, slider_lidar_rect.centery), 9)
 
         pygame.display.flip()
         clock.tick(60)
