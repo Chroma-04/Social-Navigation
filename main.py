@@ -21,6 +21,7 @@ RANGE_EVITAMENTO_PERSONE = 15  # px: sotto questa distanza da un'altra persona s
 FORZA_REPULSIONE_PERSONE = 1.3  # px/frame massimi di spinta continua fra persone/corridori/leader (a distanza 0)
 COSTO_CELLA_OCCUPATA = DIM_NODO * 10  # penalita' di costo A* per una cella occupata da un'altra entita': forte ma non un divieto assoluto (evita percorsi vuoti nei passaggi a 1 cella)
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
+INTERVALLO_AGGIORNAMENTO_MACCHIA_FRAME = 6  # ricalcolo macchia di probabilita': 60 FPS / questo valore = volte al secondo (10) - separato dal ricalcolo del percorso, cosi' l'ellisse resta aggiornata anche quando il percorso attuale e' ancora valido
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
 FILE_MAPPA_SLOT = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json"),
@@ -69,9 +70,29 @@ KALMAN_RUMORE_PROCESSO = 0.05  # varianza aggiunta alla velocita' stimata ad ogn
 KALMAN_INCERTEZZA_INIZIALE_POS = 50.0 ** 2  # varianza di posizione iniziale per una traccia appena avvistata
 KALMAN_INCERTEZZA_INIZIALE_VEL = 5.0 ** 2  # varianza di velocita' iniziale per una traccia appena avvistata
 PREVISIONE_BLOB_FRAME = 60  # quanti frame nel futuro si proietta il centro della macchia (60 = 1s)
-RAGGIO_BLOB_CELLE = 6  # raggio massimo (in celle della griglia di movimento) della diffusione della macchia di probabilita'
+RAGGIO_BLOB_CELLE = 3.0  # raggio massimo (in celle della griglia di movimento) della diffusione della macchia di probabilita': isotropa (persona ferma) = ~7x7 celle, allungata (in moto) = fino a ~13 celle lungo la marcia e ~5 di lato
 DECADIMENTO_BLOB = 0.75  # fattore di decadimento del peso per ogni passo-cella di diffusione attraverso lo spazio libero
-COSTO_MASSIMO_PROBABILITA = COSTO_CELLA_OCCUPATA * 0.5  # costo extra A* al centro della macchia (peso 1.0): piu' morbido del blocco per rilevamento diretto
+# quando piu' ellissoidi si sovrappongono, il peso si combina come un'unione di probabilita'
+# indipendenti (1 - prodotto delle probabilita' di NON esserci) invece di sommarsi linearmente: cresce
+# in modo molto piu' morbido (i contributi successivi contano sempre meno) e non serve un tetto
+# artificiale, perche' il risultato satura naturalmente a 1.0 - lo stesso costo massimo di una singola
+# macchia piena, mai di piu'. Una somma lineare pura faceva crescere il costo troppo in fretta con poche
+# persone vicine, spingendo il robot a fare giri lunghissimi anche quando conveniva passarci in mezzo.
+# quanto la macchia si allunga lungo la direzione di marcia stimata (velocita' del Kalman): un passo di
+# diffusione allineato con l'heading costa meno (la macchia si allunga avanti/indietro), uno
+# perpendicolare costa piu' del normale (si restringe ai lati) - il risultato e' un ellissoide orientato
+# vero (piu' incertezza lungo la marcia, meno di lato) invece della macchia isotropa (stesso raggio in
+# ogni direzione). 0 = nessun allungamento (comportamento isotropo di prima); il minimo del fattore resta
+# ben sopra zero apposta, altrimenti un passo quasi gratuito nella direzione dell'heading farebbe
+# esplodere la macchia.
+ALLUNGAMENTO_BLOB = 0.55
+# soglia di sicurezza puramente numerica dentro macchia_diffusione (evita di normalizzare un vettore
+# heading vicino a zero): NON e' piu' il modo con cui si decide se una persona e' "ferma" (con
+# RUMORE_LIDAR_PX=8 la velocita' residua di un target davvero fermo si sovrappone troppo a quella di un
+# pedone lentissimo per separarli con una soglia sulla sola velocita' stimata - vedi il flag "ferma"
+# sulle tracce Kalman, che usa invece lo stato reale della simulazione).
+VELOCITA_MINIMA_AFFIDABILE = 0.15
+COSTO_MASSIMO_PROBABILITA = COSTO_CELLA_OCCUPATA * 0.2  # costo extra A* al centro della macchia (peso 1.0): piu' morbido del blocco per rilevamento diretto. A 0.5 il robot preferiva un giro enorme pur di evitare una porta coperta da piu' persone sovrapposte, invece di passarci con cautela (misurato: a 150 fa un giro di 2106px invece di 1077px per una deviazione cauta) - 0.2 resta sotto la soglia empirica (~100-105) a cui scatta il giro assurdo
 COLORE_BLOB_PROBABILITA = (40, 130, 255)
 # isteresi sul percorso del robot: senza uno sconto sulla strada gia' scelta, quando due percorsi hanno
 # costo quasi identico basta una piccola fluttuazione di rumore (macchia di probabilita' ricalcolata,
@@ -187,11 +208,25 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
                     # cella a cella invece di essere lo stesso ovunque
                     dist += mappa_costo_extra.get((r, c), 0.0)
                 nuovo_g = attuale.g + dist
+                nuovo_genitore = attuale
+
+                # Theta* (any-angle): se il "nonno" ha una scorciatoia libera verso il vicino (nessun
+                # muro, nessuna cella occupata o a costo positivo nel mezzo), collegarsi direttamente a
+                # lui invece che passare dal genitore intermedio da' un percorso piu' corto e non
+                # vincolato ai soli 8 angoli della griglia - e' quello che rende i tragitti smussati
+                # invece che a gradini, riusando la stessa idea del raycasting gia' usato per il lidar
+                if attuale.genitore is not None and scorciatoia_libera(griglia, attuale.genitore, vicino, celle_bloccate, mappa_costo_extra):
+                    dist_scorciatoia = math.hypot(vicino.cx - attuale.genitore.cx, vicino.cy - attuale.genitore.cy)
+                    nuovo_g_scorciatoia = attuale.genitore.g + dist_scorciatoia
+                    if nuovo_g_scorciatoia < nuovo_g:
+                        nuovo_g = nuovo_g_scorciatoia
+                        nuovo_genitore = attuale.genitore
+
                 if vicino not in in_open or nuovo_g < in_open[vicino]:
                     vicino.g = nuovo_g
                     vicino.h = math.sqrt((vicino.cx - nodo_fine.cx)**2 + (vicino.cy - nodo_fine.cy)**2)
                     vicino.f = vicino.g + vicino.h
-                    vicino.genitore = attuale
+                    vicino.genitore = nuovo_genitore
                     in_open[vicino] = nuovo_g
                     contatore += 1
                     heapq.heappush(open_heap, (vicino.f, contatore, vicino))
@@ -413,6 +448,28 @@ def linea_di_vista_libera(griglia, x1, y1, x2, y2):
             return False
     return True
 
+def scorciatoia_libera(griglia, nodo_a, nodo_b, celle_bloccate, mappa_costo_extra):
+    """True se il segmento fra due nodi e' davvero libero per una scorciatoia 'any-angle' (Theta*): non
+    solo nessun muro (come linea_di_vista_libera), ma anche nessuna cella occupata o con costo extra
+    positivo (macchia di probabilita') lungo il tragitto. Una scorciatoia salta i nodi intermedi della
+    griglia, quindi deve valere solo attraverso spazio davvero libero: altrimenti bypasserebbe i costi
+    morbidi che servono a far scartare al robot le persone rilevate o la loro incertezza prevista."""
+    dist = math.hypot(nodo_b.cx - nodo_a.cx, nodo_b.cy - nodo_a.cy)
+    if dist == 0:
+        return True
+    passi = max(1, int(dist / (DIM_NODO / 4)))
+    for i in range(passi + 1):
+        t = i / passi
+        x, y = nodo_a.cx + (nodo_b.cx - nodo_a.cx) * t, nodo_a.cy + (nodo_b.cy - nodo_a.cy) * t
+        r, c = int(y // DIM_NODO), int(x // DIM_NODO)
+        if not (0 <= r < Y_TOT and 0 <= c < X_TOT) or griglia[r][c].tipo == "muro":
+            return False
+        if celle_bloccate and (r, c) in celle_bloccate:
+            return False
+        if mappa_costo_extra and mappa_costo_extra.get((r, c), 0.0) > 0:
+            return False
+    return True
+
 def colore_rilevamento(px, py, robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia):
     """Colore di una persona in base alla distanza dal robot: verde se fuori dal raggio del lidar o
     nascosta da un muro (non rilevata), arancione se rilevata dal lidar, rosso se dentro la zona di
@@ -485,7 +542,7 @@ def sottocella_e_muro(griglia, rf, cf, sottocelle_per_lato):
 _DIREZIONI_DIFFUSIONE = ((0, 1, 1.0), (0, -1, 1.0), (1, 0, 1.0), (-1, 0, 1.0),
                           (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2)))
 
-def macchia_diffusione(griglia, rf_centro, cf_centro, raggio_sottocelle, decadimento, sottocelle_per_lato):
+def macchia_diffusione(griglia, rf_centro, cf_centro, raggio_sottocelle, decadimento, sottocelle_per_lato, direzione=None):
     """Espande un peso (1.0 al centro) attraverso lo spazio libero a partire dalla sottocella centrale
     (Dijkstra a 8 direzioni sulla griglia fine, con le diagonali che costano radice di 2 invece di 1):
     i muri (letti dalla griglia di movimento originale) bloccano il flusso, quindi la macchia si piega
@@ -493,10 +550,23 @@ def macchia_diffusione(griglia, rf_centro, cf_centro, raggio_sottocelle, decadim
     decadimento e' funzione della distanza euclidea percorsa (non del numero di passi), quindi il fronte
     d'onda approssima un cerchio/ellisse invece di un rombo. Lavora sulla sotto-griglia
     ('sottocelle_per_lato' volte piu' densa, regolabile dal pannello) solo per la macchia stessa:
-    l'A* e il movimento non la vedono."""
+    l'A* e il movimento non la vedono.
+
+    'direzione' (vx, vy, es. la velocita' stimata dal Kalman) rende la diffusione anisotropa: i passi
+    allineati con la direzione di marcia costano meno (la macchia si allunga in avanti/indietro lungo
+    l'heading), quelli perpendicolari costano il normale - il risultato e' un ellissoide orientato vero
+    invece della macchia isotropa. None (o velocita' troppo piccola per fidarsi dell'heading) ricade sul
+    comportamento isotropo di prima."""
     y_tot_fine, x_tot_fine = Y_TOT * sottocelle_per_lato, X_TOT * sottocelle_per_lato
     if sottocella_e_muro(griglia, rf_centro, cf_centro, sottocelle_per_lato):
         return {}
+
+    hx = hy = 0.0
+    if direzione is not None:
+        norma_direzione = math.hypot(direzione[0], direzione[1])
+        if norma_direzione > VELOCITA_MINIMA_AFFIDABILE:  # velocita' troppo piccola: heading inaffidabile, resta isotropo
+            hx, hy = direzione[0] / norma_direzione, direzione[1] / norma_direzione
+
     distanza_massima = min(raggio_sottocelle, math.log(0.02) / math.log(decadimento))
     distanze = {(rf_centro, cf_centro): 0.0}
     coda = [(0.0, rf_centro, cf_centro)]
@@ -506,6 +576,16 @@ def macchia_diffusione(griglia, rf_centro, cf_centro, raggio_sottocelle, decadim
             continue
         for dr, dc, passo in _DIREZIONI_DIFFUSIONE:
             rv, cv = r + dr, c + dc
+            if hx or hy:
+                # colonna = asse x, riga = asse y: stesso sistema di coordinate dell'heading (vx, vy)
+                norma_passo = math.hypot(dc, dr)
+                cos_theta = (dc * hx + dr * hy) / norma_passo
+                # simmetrico: allineato con l'heading (cos^2=1) costa meno -> si allunga avanti/indietro;
+                # perpendicolare (cos^2=0) costa piu' del normale -> si restringe ai lati. Con solo lo
+                # sconto in avanti (senza il sovrapprezzo laterale) la macchia crescerebbe ovunque invece
+                # di restringersi ai lati come un vero ellissoide
+                fattore_direzionale = max(0.35, (1.0 + ALLUNGAMENTO_BLOB) - 2 * ALLUNGAMENTO_BLOB * cos_theta * cos_theta)
+                passo = passo * fattore_direzionale
             nuova_dist = dist + passo
             if nuova_dist > distanza_massima:
                 continue
@@ -669,6 +749,7 @@ def main():
     tracciamento_lidar = {}  # id(persona) -> traccia Kalman, solo per le persone attualmente rilevate dal lidar
     mappa_pesi_render = {}  # ultima macchia di probabilita' calcolata (per sottocella, peso 0-1): persiste fra un ricalcolo e l'altro per il disegno
     mappa_pesi_render_dim_sottocella = DIM_NODO / SOTTOCELLE_PER_LATO_DEFAULT  # dimensione delle sottocelle usata per l'ultima macchia calcolata (per disegnarla con le coordinate giuste anche se lo slider e' cambiato nel frattempo)
+    mappa_costo_probabilita = {}  # ultimo costo extra per l'A* derivato dalla macchia (per cella grossa): persiste perche' ora si aggiorna a una cadenza propria, separata dal ricalcolo del percorso
 
     # --- NUMERO PERSONE/CORRIDORI/FERME/GRUPPI E PANNELLO TECNICO (valori di default) ---
     numero_persone = NUMERO_PERSONE_DEFAULT
@@ -900,8 +981,8 @@ def main():
                             configurazione_messaggio = ("Nessuna configurazione salvata", ROSSO)
                         configurazione_salvataggio_timer = 90
                     elif button_reset_config_rect.collidepoint(event.pos):
-                        if os.path.exists(FILE_CONFIGURAZIONE_PANNELLO):
-                            os.remove(FILE_CONFIGURAZIONE_PANNELLO)
+                        # azzera solo l'ambiente ATTUALE ai valori di default: non tocca il file salvato,
+                        # cosi' si puo' pulire e poi ricaricare con "Carica config." l'ambiente di prima
                         numero_persone, numero_corridori = NUMERO_PERSONE_DEFAULT, NUMERO_CORRIDORI_DEFAULT
                         numero_persone_ferme, numero_gruppi = NUMERO_PERSONE_FERME_DEFAULT, NUMERO_GRUPPI_DEFAULT
                         sincronizza_persone(persone, numero_persone, griglia)
@@ -1197,6 +1278,14 @@ def main():
                     tracciamento_lidar[pid] = nuova_traccia_kalman(xr, yr)
                 else:
                     aggiorna_traccia_kalman(tracciamento_lidar[pid], xr, yr)
+                # stato "ferma" noto con certezza dalla simulazione stessa (non stimato dal rumore): le
+                # persone_ferme e i membri statici dei gruppi non hanno affatto la chiave "stato", le
+                # persone/corridori/membri mobili ce l'hanno e valgono "attesa" quando sono davvero ferme
+                # in questo istante. Una soglia sulla sola velocita' stimata dal Kalman non basta: con
+                # RUMORE_LIDAR_PX=8 il rumore residuo di un target davvero fermo (fino a ~1.3px/frame nei
+                # casi peggiori) si sovrappone quasi del tutto alla velocita' di un pedone lentissimo
+                # (0.4px/frame), quindi non esiste una soglia che separi bene i due casi
+                tracciamento_lidar[pid]["ferma"] = p.get("stato", "attesa") == "attesa"
 
         # le tracce di persone non piu' rilevate (uscite dal raggio o nascoste da un muro) vengono
         # abbandonate subito, nessun "coasting": coerente con "il robot ragiona solo su cio' che percepisce"
@@ -1204,50 +1293,89 @@ def main():
             if pid_vecchio not in id_rilevati_ora:
                 del tracciamento_lidar[pid_vecchio]
 
+        # percorso 'da proteggere' per l'isteresi (vedi piu' sotto): va catturato PRIMA dell'eventuale
+        # azzeramento qui sotto, altrimenti ogni volta che l'insieme delle persone rilevate cambia anche
+        # di una sola cella (capita spessissimo con una scena affollata) l'isteresi si ritroverebbe a
+        # proteggere una lista vuota, cioe' a non fare nulla
+        percorso_precedente_per_isteresi = percorso
+
         if celle_rilevate != celle_rilevate_precedenti:
             percorso = []  # e' cambiato l'insieme di persone rilevate: il percorso pianificato potrebbe non essere piu' valido
         celle_rilevate_precedenti = celle_rilevate
 
+        # macchia di probabilita': aggiornata alla propria cadenza (10 volte al secondo di default),
+        # indipendente da quando il robot ricalcola davvero il percorso - si proietta in avanti ogni
+        # traccia rilevata e si fa diffondere il suo peso attraverso lo spazio libero, cosi' il costo
+        # extra e' morbido (decresce dal centro previsto) invece del blocco secco usato per la posizione
+        # rilevata adesso. Separata dal ricalcolo del percorso: prima scattavano insieme (una volta al
+        # secondo, o quando cambiava l'insieme di celle rilevate), rendendo l'ellisse visibilmente "a
+        # scatti" invece che fluida.
+        if contatore_frame % INTERVALLO_AGGIORNAMENTO_MACCHIA_FRAME == 0:
+            # "definizione ellissoidi" (pannello tecnico): quante sottocelle per lato compone la macchia.
+            # Al minimo (1) coincide con la griglia di movimento (quadrati), al massimo le sottocelle
+            # sono cosi' piccole che la macchia appare un ellissoide continuo
+            sottocelle_per_lato = max(SOTTOCELLE_PER_LATO_MIN, round(definizione_ellissoidi))
+            dim_sottocella = DIM_NODO / sottocelle_per_lato
+            y_tot_fine, x_tot_fine = Y_TOT * sottocelle_per_lato, X_TOT * sottocelle_per_lato
+            raggio_blob_sottocelle = RAGGIO_BLOB_CELLE * sottocelle_per_lato
+            decadimento_blob_sottocella = DECADIMENTO_BLOB ** (1 / sottocelle_per_lato)
+
+            mappa_pesi_render = {}  # chiavi in sottocelle (griglia fine), solo per la macchia/il disegno
+            for traccia in tracciamento_lidar.values():
+                # persona davvero ferma (stato noto dalla simulazione, non stimato dal rumore): niente
+                # proiezione in avanti ne' orientamento, altrimenti anche un residuo di rumore verrebbe
+                # amplificato di PREVISIONE_BLOB_FRAME volte e la macchia si sposterebbe/orienterebbe
+                # visibilmente ad ogni aggiornamento pur restando la persona immobile
+                e_ferma = traccia.get("ferma", False)
+                frame_futuri_effettivi = 0 if e_ferma else PREVISIONE_BLOB_FRAME
+                direzione_traccia = None if e_ferma else (traccia["vx"], traccia["vy"])
+                x_prev, y_prev = previsione_posizione_kalman(traccia, frame_futuri_effettivi)
+                rf_prev = max(0, min(y_tot_fine - 1, int(y_prev // dim_sottocella)))
+                cf_prev = max(0, min(x_tot_fine - 1, int(x_prev // dim_sottocella)))
+                # combinazione (non massimo) fra gli ellissoidi di persone diverse: dove si sovrappongono
+                # il rischio cresce un po' rispetto alla singola persona piu' vicina, ma satura verso 1.0
+                # invece di sommarsi linearmente - vedi il commento sopra la definizione della macchia
+                for sottocella, peso in macchia_diffusione(griglia, rf_prev, cf_prev, raggio_blob_sottocelle, decadimento_blob_sottocella, sottocelle_per_lato, direzione=direzione_traccia).items():
+                    peso_precedente = mappa_pesi_render.get(sottocella, 0.0)
+                    mappa_pesi_render[sottocella] = 1.0 - (1.0 - peso_precedente) * (1.0 - peso)
+            # per l'A* (che resta sulla griglia originale) si aggregano le sottocelle nella cella grossa
+            # che le contiene, prendendo il peso massimo fra quelle che vi cadono dentro
+            mappa_costo_probabilita = {}
+            for (rf, cf), peso in mappa_pesi_render.items():
+                cella = (rf // sottocelle_per_lato, cf // sottocelle_per_lato)
+                costo = peso * COSTO_MASSIMO_PROBABILITA
+                if cella not in mappa_costo_probabilita or mappa_costo_probabilita[cella] < costo:
+                    mappa_costo_probabilita[cella] = costo
+            mappa_pesi_render_dim_sottocella = dim_sottocella  # ricordata per il disegno, che avviene in un punto diverso del frame
+
         if target_pos and not robot_bloccato:
             if not percorso or tempo_di_ricalcolare_robot:
-                # macchia di probabilita': solo qui (al ricalcolo, non ogni frame) si proietta in avanti
-                # ogni traccia rilevata e si fa diffondere il suo peso attraverso lo spazio libero, cosi'
-                # il costo extra e' morbido (decresce dal centro previsto) invece del blocco secco usato
-                # per la posizione rilevata adesso
-                # "definizione ellissoidi" (pannello tecnico): quante sottocelle per lato compone la
-                # macchia. Al minimo (1) coincide con la griglia di movimento (quadrati), al massimo le
-                # sottocelle sono cosi' piccole che la macchia appare un ellissoide continuo
-                sottocelle_per_lato = max(SOTTOCELLE_PER_LATO_MIN, round(definizione_ellissoidi))
-                dim_sottocella = DIM_NODO / sottocelle_per_lato
-                y_tot_fine, x_tot_fine = Y_TOT * sottocelle_per_lato, X_TOT * sottocelle_per_lato
-                raggio_blob_sottocelle = RAGGIO_BLOB_CELLE * sottocelle_per_lato
-                decadimento_blob_sottocella = DECADIMENTO_BLOB ** (1 / sottocelle_per_lato)
-
-                mappa_pesi_render = {}  # chiavi in sottocelle (griglia fine), solo per la macchia/il disegno
-                for traccia in tracciamento_lidar.values():
-                    x_prev, y_prev = previsione_posizione_kalman(traccia, PREVISIONE_BLOB_FRAME)
-                    rf_prev = max(0, min(y_tot_fine - 1, int(y_prev // dim_sottocella)))
-                    cf_prev = max(0, min(x_tot_fine - 1, int(x_prev // dim_sottocella)))
-                    for sottocella, peso in macchia_diffusione(griglia, rf_prev, cf_prev, raggio_blob_sottocelle, decadimento_blob_sottocella, sottocelle_per_lato).items():
-                        if sottocella not in mappa_pesi_render or mappa_pesi_render[sottocella] < peso:
-                            mappa_pesi_render[sottocella] = peso
-                # per l'A* (che resta sulla griglia originale) si aggregano le sottocelle nella cella
-                # grossa che le contiene, prendendo il peso massimo fra quelle che vi cadono dentro
-                mappa_costo_probabilita = {}
-                for (rf, cf), peso in mappa_pesi_render.items():
-                    cella = (rf // sottocelle_per_lato, cf // sottocelle_per_lato)
-                    costo = peso * COSTO_MASSIMO_PROBABILITA
-                    if cella not in mappa_costo_probabilita or mappa_costo_probabilita[cella] < costo:
-                        mappa_costo_probabilita[cella] = costo
-                mappa_pesi_render_dim_sottocella = dim_sottocella  # ricordata per il disegno, che avviene in un punto diverso del frame
-
-                # isteresi: sconto sulle prossime celle del percorso gia' in corso, per non ribaltare la
-                # scelta fra due percorsi quasi equivalenti a ogni ricalcolo solo per rumore (vedi commento
-                # sulla costante COSTO_ISTERESI_PERCORSO)
+                # isteresi: sconto sulla prossima porzione del percorso gia' in corso, per non ribaltare
+                # la scelta fra due percorsi quasi equivalenti a ogni ricalcolo solo per rumore (vedi
+                # commento sulla costante COSTO_ISTERESI_PERCORSO). Con Theta* il percorso puo' avere
+                # pochissimi waypoint (una scorciatoia lunga = un solo segmento fra due nodi anche molto
+                # distanti), quindi lo sconto cammina lungo la geometria reale dei segmenti campionando
+                # ogni DIM_NODO px, invece di contare le prime N voci della lista - cosi' copre sempre la
+                # stessa portata fisica (~CELLE_ISTERESI_PERCORSO celle) indipendentemente da quanti nodi
+                # produce la ricerca any-angle.
                 mappa_costo_extra_robot = dict(mappa_costo_probabilita)
-                for nodo_percorso_attuale in percorso[:CELLE_ISTERESI_PERCORSO]:
-                    cella = (nodo_percorso_attuale.r, nodo_percorso_attuale.c)
-                    mappa_costo_extra_robot[cella] = mappa_costo_extra_robot.get(cella, 0.0) - COSTO_ISTERESI_PERCORSO
+                budget_isteresi_px = CELLE_ISTERESI_PERCORSO * DIM_NODO
+                distanza_isteresi_percorsa = 0.0
+                for i in range(len(percorso_precedente_per_isteresi) - 1):
+                    if distanza_isteresi_percorsa >= budget_isteresi_px:
+                        break
+                    a, b = percorso_precedente_per_isteresi[i], percorso_precedente_per_isteresi[i + 1]
+                    lunghezza_segmento = math.hypot(b.cx - a.cx, b.cy - a.cy)
+                    passi_segmento = max(1, int(lunghezza_segmento / DIM_NODO))
+                    for passo_i in range(passi_segmento + 1):
+                        if distanza_isteresi_percorsa >= budget_isteresi_px:
+                            break
+                        t = passo_i / passi_segmento
+                        x = a.cx + (b.cx - a.cx) * t
+                        y = a.cy + (b.cy - a.cy) * t
+                        cella = (int(y // DIM_NODO), int(x // DIM_NODO))
+                        mappa_costo_extra_robot[cella] = mappa_costo_extra_robot.get(cella, 0.0) - COSTO_ISTERESI_PERCORSO
+                        distanza_isteresi_percorsa += lunghezza_segmento / passi_segmento
 
                 percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_extra_robot)
             meta_nodo = griglia[target_pos[0]][target_pos[1]]
