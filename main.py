@@ -55,6 +55,8 @@ RAGGIO_SICUREZZA_DEFAULT = 20
 ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
 RAGGIO_ROBOT_MIN, RAGGIO_ROBOT_MAX = 5, int(DIM_NODO * 1.5)
 RAGGIO_ROBOT_DEFAULT = DIM_NODO // 3  # raggio "fisico" del robot (lo stesso con cui viene disegnato di default)
+RAGGIO_PERSONA_MIN, RAGGIO_PERSONA_MAX = 3, int(DIM_NODO * 0.9)
+RAGGIO_PERSONA_DEFAULT = 8  # raggio con cui vengono disegnate le persone
 FORZA_REPULSIONE_ROBOT = 1.3  # px/frame massimi di spinta continua lontano dal robot (a distanza 0)
 RAGGIO_LIDAR_MIN, RAGGIO_LIDAR_MAX = 0, DIM_NODO * 10
 RAGGIO_LIDAR_DEFAULT = DIM_NODO * 4  # raggio di rilevamento del "lidar" simulato del robot
@@ -527,6 +529,8 @@ def main():
     trascinando_raggio_robot = False
     raggio_lidar = RAGGIO_LIDAR_DEFAULT
     trascinando_raggio_lidar = False
+    raggio_persona = RAGGIO_PERSONA_DEFAULT
+    trascinando_raggio_persona = False
 
     contatore_frame = 0
 
@@ -558,7 +562,7 @@ def main():
                     pygame.draw.rect(screen, GRIGIO_BORDO_CELLA, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 300, 475
+        panel_w, panel_h = 300, 550
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
         numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
@@ -568,6 +572,7 @@ def main():
         slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 275, panel_w - 30, 8)
         slider_robot_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 350, panel_w - 30, 8)
         slider_lidar_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 425, panel_w - 30, 8)
+        slider_persona_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 500, panel_w - 30, 8)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -637,6 +642,10 @@ def main():
                         trascinando_raggio_lidar = True
                         rel = (event.pos[0] - slider_lidar_rect.x) / slider_lidar_rect.width
                         raggio_lidar = RAGGIO_LIDAR_MIN + max(0, min(1, rel)) * (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
+                    elif slider_persona_rect.inflate(0, 20).collidepoint(event.pos):
+                        trascinando_raggio_persona = True
+                        rel = (event.pos[0] - slider_persona_rect.x) / slider_persona_rect.width
+                        raggio_persona = RAGGIO_PERSONA_MIN + max(0, min(1, rel)) * (RAGGIO_PERSONA_MAX - RAGGIO_PERSONA_MIN)
                 elif event.button == 4: zoom *= 1.1 # Zoom In
                 elif event.button == 5: zoom /= 1.1 # Zoom Out
                 elif event.button == 3: # Inizio Pan
@@ -656,6 +665,7 @@ def main():
                     trascinando_raggio = False
                     trascinando_raggio_robot = False
                     trascinando_raggio_lidar = False
+                    trascinando_raggio_persona = False
 
             if event.type == pygame.MOUSEMOTION:
                 if trascinando_slider:
@@ -673,6 +683,10 @@ def main():
                 if trascinando_raggio_lidar:
                     rel = (event.pos[0] - slider_lidar_rect.x) / slider_lidar_rect.width
                     raggio_lidar = RAGGIO_LIDAR_MIN + max(0, min(1, rel)) * (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
+                    continue
+                if trascinando_raggio_persona:
+                    rel = (event.pos[0] - slider_persona_rect.x) / slider_persona_rect.width
+                    raggio_persona = RAGGIO_PERSONA_MIN + max(0, min(1, rel)) * (RAGGIO_PERSONA_MAX - RAGGIO_PERSONA_MIN)
                     continue
 
                 # Gestione Panning
@@ -903,7 +917,7 @@ def main():
 
         # 3b. Movimento persone, corridori e membri dei gruppi (stessa logica per tutti, cambia solo la velocita')
         range_evitamento_quad = RANGE_EVITAMENTO_PERSONE ** 2
-        range_evitamento_robot = raggio_robot + DIM_NODO // 3  # raggio robot (regolabile) + raggio persona: i corpi non si sovrappongono mai
+        range_evitamento_robot = raggio_robot + raggio_persona  # raggio robot + raggio persona (entrambi regolabili): i corpi non si sovrappongono mai
         # bucket spaziali per trovare i vicini di ciascuna entita' senza confrontarla con tutte le altre
         # (O(n) invece di O(n^2)): fondamentale con centinaia di persone in scena
         griglia_spaziale = costruisci_griglia_spaziale(tutte_mobili, DIM_NODO)
@@ -1065,12 +1079,12 @@ def main():
         for p in tutte_mobili:
             px, py = t_s(p["x"], p["y"])
             colore_p = colore_rilevamento(p["x"], p["y"], robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia)
-            pygame.draw.circle(screen, colore_p, (px, py), int((DIM_NODO//3) * zoom))
+            pygame.draw.circle(screen, colore_p, (px, py), int(raggio_persona * zoom))
 
         for pf in persone_ferme:
             fx, fy = t_s(pf["x"], pf["y"])
             colore_pf = colore_rilevamento(pf["x"], pf["y"], robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia)
-            pygame.draw.circle(screen, colore_pf, (fx, fy), int((DIM_NODO//3) * zoom))
+            pygame.draw.circle(screen, colore_pf, (fx, fy), int(raggio_persona * zoom))
 
         for g in gruppi:
             if g["mobile"]:
@@ -1078,7 +1092,7 @@ def main():
             for m in g["membri"]:
                 mpx, mpy = t_s(m["x"], m["y"])
                 colore_m = colore_rilevamento(m["x"], m["y"], robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia)
-                pygame.draw.circle(screen, colore_m, (mpx, mpy), int((DIM_NODO//3) * zoom))
+                pygame.draw.circle(screen, colore_m, (mpx, mpy), int(raggio_persona * zoom))
 
         if modalita_rettangolo:
             msg = "Clicca il secondo punto (Esc annulla)" if primo_punto_rettangolo else "Clicca il primo punto (Esc annulla)"
@@ -1203,6 +1217,14 @@ def main():
             rel_lidar = (raggio_lidar - RAGGIO_LIDAR_MIN) / (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
             handle_lidar_x = slider_lidar_rect.x + int(rel_lidar * slider_lidar_rect.width)
             pygame.draw.circle(screen, COLORE_LIDAR, (handle_lidar_x, slider_lidar_rect.centery), 9)
+
+            persona_txt = font.render(f"Dimensione persone: {int(raggio_persona)}px", True, NERO)
+            screen.blit(persona_txt, (panel_rect.x + 15, panel_rect.y + 470))
+
+            pygame.draw.rect(screen, GRIGIO, slider_persona_rect)
+            rel_persona = (raggio_persona - RAGGIO_PERSONA_MIN) / (RAGGIO_PERSONA_MAX - RAGGIO_PERSONA_MIN)
+            handle_persona_x = slider_persona_rect.x + int(rel_persona * slider_persona_rect.width)
+            pygame.draw.circle(screen, ARANCIONE, (handle_persona_x, slider_persona_rect.centery), 9)
 
         pygame.display.flip()
         clock.tick(60)
