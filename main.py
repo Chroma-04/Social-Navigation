@@ -5,6 +5,7 @@ import math
 import json
 import random
 import heapq
+import collections
 import multiprocessing as mp
 
 # --- CONFIGURAZIONE ---
@@ -23,10 +24,12 @@ COSTO_CELLA_OCCUPATA = DIM_NODO * 10  # penalita' di costo A* per una cella occu
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
 INTERVALLO_AGGIORNAMENTO_MACCHIA_FRAME = 6  # ricalcolo macchia di probabilita': 60 FPS / questo valore = volte al secondo (10) - separato dal ricalcolo del percorso, cosi' l'ellisse resta aggiornata anche quando il percorso attuale e' ancora valido
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
+CARTELLA_MAPPE_SALVATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappe_salvate")
+CARTELLA_MAPPE_TRAINING = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappe_training")
 FILE_MAPPA_SLOT = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata.json"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata_2.json"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappa_salvata_3.json"),
+    os.path.join(CARTELLA_MAPPE_SALVATE, "mappa_salvata.json"),
+    os.path.join(CARTELLA_MAPPE_SALVATE, "mappa_salvata_2.json"),
+    os.path.join(CARTELLA_MAPPE_SALVATE, "mappa_salvata_3.json"),
 ]
 PASSWORD_SALVATAGGIO = "1258"
 FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
@@ -642,9 +645,23 @@ def passo_movimento(x, y, percorso, velocita, nodo_target, griglia):
     return tx, ty, len(percorso) <= 1, False
 
 def salva_mappa(griglia, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     muri = [[n.r, n.c] for riga in griglia for n in riga if n.tipo == "muro"]
     with open(path, "w") as f:
         json.dump(muri, f)
+
+def salva_mappa_training(griglia, cartella=CARTELLA_MAPPE_TRAINING):
+    """Salva la mappa disegnata a mano come nuovo file libero (senza password, nome automatico progressivo)
+    nella cartella dedicata alle mappe di training - separata dai 3 slot protetti dell'ambiente di test
+    personale. training_scenari.py scandisce questa cartella, quindi ogni mappa salvata qui diventa
+    automaticamente disponibile per generare scenari, senza bisogno di scrivere codice."""
+    os.makedirs(cartella, exist_ok=True)
+    i = 1
+    while os.path.exists(os.path.join(cartella, f"mappa_{i:02d}.json")):
+        i += 1
+    path = os.path.join(cartella, f"mappa_{i:02d}.json")
+    salva_mappa(griglia, path)
+    return path
 
 def salva_configurazione_pannello(configurazione, path):
     with open(path, "w") as f:
@@ -699,6 +716,19 @@ def _crea_pool_persone(griglia):
     return mp.Pool(n_worker, initializer=_pool_inizializza_worker, initargs=(_celle_muro_di(griglia),))
 
 def main():
+    # import locali (non a livello di modulo): main.py viene re-importato per intero in ogni processo
+    # worker del pool multiprocessing (spawn su Windows), che pero' calcola solo percorsi A* e non usa
+    # mai l'AI - tenerli qui invece che in cima al file evita ai worker di caricare inutilmente
+    # torch/CUDA ad ogni avvio del pool, che allungava l'avvio della simulazione di decine di secondi
+    import numpy as np
+    import torch
+    from allena_previsione import CorrezioneKalman, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO
+    # i forward pass della correzione AI sono minuscoli (batch di poche decine di persone, GRU a 32
+    # unita'): il multithreading intra-op di default di torch (quanti core ha la CPU) spende piu' tempo
+    # a sincronizzare i thread che a calcolare, e quella sincronizzazione compete col loop di pygame per
+    # il tempo di CPU - a thread singolo il forward pass e' piu' veloce e non lagga il rendering
+    torch.set_num_threads(1)
+
     pygame.init()
     fullscreen = False
 
@@ -708,7 +738,7 @@ def main():
     win_h = min(ALTEZZA, int(info.current_h * 0.9))
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
     pygame.key.start_text_input()
-    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | F11: Fullscreen | F5: Salva | F9: Carica | TAB: Pannello")
+    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | F11: Fullscreen | F5: Salva | F9: Carica | T: Salva mappa training | TAB: Pannello")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 32)
     font_piccolo = pygame.font.SysFont(None, 24)
@@ -722,9 +752,21 @@ def main():
     slot_vuoto_timer = 0
     modalita_rettangolo = False  # M: in attesa del primo/secondo click per riempire un'area rettangolare
     primo_punto_rettangolo = None
+    messaggio_mappa_training_timer = 0
+    messaggio_mappa_training_testo = ""
     
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
+
+    # modello di correzione AI sopra al Kalman (Livello 2): allenato offline da allena_previsione.py sul
+    # dataset di genera_dataset_previsione.py, caricato qui solo per l'inferenza (nessun training dal
+    # vivo). Se il file non esiste ancora (non e' mai stato allenato) il toggle in pannello resta
+    # semplicemente senza effetto, il sistema si comporta come prima (solo Kalman)
+    modello_correzione_ai = CorrezioneKalman()
+    modello_ai_disponibile = os.path.exists(FILE_MODELLO)
+    if modello_ai_disponibile:
+        modello_correzione_ai.load_state_dict(torch.load(FILE_MODELLO, map_location="cpu"))
+        modello_correzione_ai.eval()
 
     # pool di processi persistente per il ricalcolo parallelo dei percorsi (vedi commento sopra la
     # definizione): 'muri_modificati' e 'frame_ultima_modifica_muro' tengono traccia di quando i muri
@@ -732,6 +774,10 @@ def main():
     pool_persone = _crea_pool_persone(griglia)
     muri_modificati = False
     frame_ultima_modifica_muro = -9999
+    # batch di ricalcolo percorsi in sospeso presso il pool (vedi commento piu' sotto, dove veniva prima
+    # dispacciato con .map() bloccante): None quando nessun batch e' in volo
+    richiesta_percorsi_pendente = None
+    persone_richiesta_percorsi_pendente = []
 
     # --- VARIABILI ZOOM E PAN ---
     zoom = 1.0
@@ -747,6 +793,7 @@ def main():
     percorso = []
     celle_rilevate_precedenti = set()  # posizioni (vere, senza rumore) rilevate dal lidar nel frame precedente
     tracciamento_lidar = {}  # id(persona) -> traccia Kalman, solo per le persone attualmente rilevate dal lidar
+    storico_posizioni_lidar = {}  # id(persona) -> deque delle ultime FINESTRA_STORICO_FRAME posizioni/velocita' filtrate dal Kalman: input della correzione AI (stessa finestra usata in training)
     mappa_pesi_render = {}  # ultima macchia di probabilita' calcolata (per sottocella, peso 0-1): persiste fra un ricalcolo e l'altro per il disegno
     mappa_pesi_render_dim_sottocella = DIM_NODO / SOTTOCELLE_PER_LATO_DEFAULT  # dimensione delle sottocelle usata per l'ultima macchia calcolata (per disegnarla con le coordinate giuste anche se lo slider e' cambiato nel frattempo)
     mappa_costo_probabilita = {}  # ultimo costo extra per l'A* derivato dalla macchia (per cella grossa): persiste perche' ora si aggiorna a una cadenza propria, separata dal ricalcolo del percorso
@@ -780,6 +827,7 @@ def main():
     sicurezza_attiva = True
     lidar_attivo = True
     ellissoidi_attivi = True
+    ai_attiva = True  # correzione AI sopra al Kalman (solo se modello_ai_disponibile): il toggle nasconde/riattiva solo la correzione, il Kalman classico resta sempre attivo sotto
     configurazione_salvataggio_timer = 0  # breve conferma visiva dopo il click su uno dei pulsanti in fondo al pannello
     configurazione_messaggio = ("", VERDE)
 
@@ -801,6 +849,7 @@ def main():
         sicurezza_attiva = configurazione_salvata.get("sicurezza_attiva", sicurezza_attiva)
         lidar_attivo = configurazione_salvata.get("lidar_attivo", lidar_attivo)
         ellissoidi_attivi = configurazione_salvata.get("ellissoidi_attivi", ellissoidi_attivi)
+        ai_attiva = configurazione_salvata.get("ai_attiva", ai_attiva)
 
     # --- PERSONE / CORRIDORI (doppia velocita') / FERME (ostacoli statici) / GRUPPI ---
     persone = [crea_persona(griglia) for _ in range(numero_persone)]
@@ -838,7 +887,7 @@ def main():
                     pygame.draw.rect(screen, GRIGIO_BORDO_CELLA, rect, 1)
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
-        panel_w, panel_h = 370, 690
+        panel_w, panel_h = 370, 730
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
         numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
@@ -853,11 +902,12 @@ def main():
         checkbox_sicurezza_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 243, 20, 20)
         checkbox_lidar_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 393, 20, 20)
         checkbox_ellissoidi_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 543, 20, 20)
+        checkbox_ai_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 608, 20, 20)
         # pulsanti sempre in fondo al pannello, per avere l'ambiente di test preferito pronto ad ogni avvio
         larghezza_pulsante_config = (panel_w - 30 - 20) // 3
-        button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 640, larghezza_pulsante_config, 35)
-        button_carica_config_rect = pygame.Rect(button_salva_config_rect.right + 10, panel_rect.y + 640, larghezza_pulsante_config, 35)
-        button_reset_config_rect = pygame.Rect(button_carica_config_rect.right + 10, panel_rect.y + 640, larghezza_pulsante_config, 35)
+        button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 680, larghezza_pulsante_config, 35)
+        button_carica_config_rect = pygame.Rect(button_salva_config_rect.right + 10, panel_rect.y + 680, larghezza_pulsante_config, 35)
+        button_reset_config_rect = pygame.Rect(button_carica_config_rect.right + 10, panel_rect.y + 680, larghezza_pulsante_config, 35)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -943,6 +993,8 @@ def main():
                         lidar_attivo = not lidar_attivo
                     elif checkbox_ellissoidi_rect.collidepoint(event.pos):
                         ellissoidi_attivi = not ellissoidi_attivi
+                    elif checkbox_ai_rect.collidepoint(event.pos):
+                        ai_attiva = not ai_attiva
                     elif button_salva_config_rect.collidepoint(event.pos):
                         salva_configurazione_pannello({
                             "numero_persone": numero_persone, "numero_corridori": numero_corridori,
@@ -952,7 +1004,7 @@ def main():
                             "raggio_lidar": raggio_lidar, "raggio_persona": raggio_persona,
                             "definizione_ellissoidi": definizione_ellissoidi,
                             "sicurezza_attiva": sicurezza_attiva, "lidar_attivo": lidar_attivo,
-                            "ellissoidi_attivi": ellissoidi_attivi,
+                            "ellissoidi_attivi": ellissoidi_attivi, "ai_attiva": ai_attiva,
                         }, FILE_CONFIGURAZIONE_PANNELLO)
                         configurazione_messaggio = ("Configurazione salvata", VERDE)
                         configurazione_salvataggio_timer = 90
@@ -976,6 +1028,7 @@ def main():
                             sicurezza_attiva = configurazione_da_caricare.get("sicurezza_attiva", sicurezza_attiva)
                             lidar_attivo = configurazione_da_caricare.get("lidar_attivo", lidar_attivo)
                             ellissoidi_attivi = configurazione_da_caricare.get("ellissoidi_attivi", ellissoidi_attivi)
+                            ai_attiva = configurazione_da_caricare.get("ai_attiva", ai_attiva)
                             configurazione_messaggio = ("Configurazione caricata", VERDE)
                         else:
                             configurazione_messaggio = ("Nessuna configurazione salvata", ROSSO)
@@ -993,7 +1046,7 @@ def main():
                         raggio_sicurezza, raggio_robot = RAGGIO_SICUREZZA_DEFAULT, RAGGIO_ROBOT_DEFAULT
                         raggio_lidar, raggio_persona = RAGGIO_LIDAR_DEFAULT, RAGGIO_PERSONA_DEFAULT
                         definizione_ellissoidi = SOTTOCELLE_PER_LATO_DEFAULT
-                        sicurezza_attiva = lidar_attivo = ellissoidi_attivi = True
+                        sicurezza_attiva = lidar_attivo = ellissoidi_attivi = ai_attiva = True
                         configurazione_messaggio = ("Configurazione ripristinata", VERDE)
                         configurazione_salvataggio_timer = 90
                 elif event.button == 4: zoom *= 1.1 # Zoom In
@@ -1001,7 +1054,7 @@ def main():
                 elif event.button == 3: # Inizio Pan
                     trascinando = True
                     ultima_pos_mouse = event.pos
-                elif event.button == 1: # Meta
+                elif event.button == 1 and not pygame.key.get_pressed()[pygame.K_w]: # Meta (esclude un click mentre si disegnano muri con W, altrimenti comanda il robot per sbaglio)
                     mx, my = t_m(event.pos[0], event.pos[1])
                     r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
                     if 0 <= r < Y_TOT and 0 <= c < X_TOT:
@@ -1212,6 +1265,11 @@ def main():
                 if event.key == pygame.K_F9:
                     menu_caricamento_aperto = True
 
+                if event.key == pygame.K_t:
+                    path_salvata = salva_mappa_training(griglia)
+                    messaggio_mappa_training_testo = f"Mappa training salvata: {os.path.basename(path_salvata)}"
+                    messaggio_mappa_training_timer = 90
+
                 if event.key == pygame.K_TAB:
                     pannello_aperto = not pannello_aperto
 
@@ -1276,6 +1334,7 @@ def main():
                 id_rilevati_ora.add(pid)
                 if pid not in tracciamento_lidar:
                     tracciamento_lidar[pid] = nuova_traccia_kalman(xr, yr)
+                    storico_posizioni_lidar[pid] = collections.deque(maxlen=FINESTRA_STORICO_FRAME)
                 else:
                     aggiorna_traccia_kalman(tracciamento_lidar[pid], xr, yr)
                 # stato "ferma" noto con certezza dalla simulazione stessa (non stimato dal rumore): le
@@ -1286,12 +1345,15 @@ def main():
                 # casi peggiori) si sovrappone quasi del tutto alla velocita' di un pedone lentissimo
                 # (0.4px/frame), quindi non esiste una soglia che separi bene i due casi
                 tracciamento_lidar[pid]["ferma"] = p.get("stato", "attesa") == "attesa"
+                traccia_pid = tracciamento_lidar[pid]
+                storico_posizioni_lidar[pid].append((traccia_pid["x"], traccia_pid["y"], traccia_pid["vx"], traccia_pid["vy"]))
 
         # le tracce di persone non piu' rilevate (uscite dal raggio o nascoste da un muro) vengono
         # abbandonate subito, nessun "coasting": coerente con "il robot ragiona solo su cio' che percepisce"
         for pid_vecchio in list(tracciamento_lidar.keys()):
             if pid_vecchio not in id_rilevati_ora:
                 del tracciamento_lidar[pid_vecchio]
+                storico_posizioni_lidar.pop(pid_vecchio, None)
 
         # percorso 'da proteggere' per l'isteresi (vedi piu' sotto): va catturato PRIMA dell'eventuale
         # azzeramento qui sotto, altrimenti ogni volta che l'insieme delle persone rilevate cambia anche
@@ -1320,8 +1382,29 @@ def main():
             raggio_blob_sottocelle = RAGGIO_BLOB_CELLE * sottocelle_per_lato
             decadimento_blob_sottocella = DECADIMENTO_BLOB ** (1 / sottocelle_per_lato)
 
+            # correzione AI (Livello 2): un solo forward pass "a batch" per tutte le persone invece di uno
+            # per persona - il costo fisso per chiamata di torch (creazione tensori, dispatch del modulo,
+            # ecc.) domina su un input cosi' piccolo, quindi farne una sola con tutte le tracce impilate
+            # e' molto piu' leggero che ripeterla in un ciclo, a parita' di risultato numerico
+            correzioni_ai = {}
+            if ai_attiva and modello_ai_disponibile:
+                pid_da_correggere = []
+                storici_da_correggere = []
+                for pid, traccia in tracciamento_lidar.items():
+                    if traccia.get("ferma", False):
+                        continue
+                    storico_pid = storico_posizioni_lidar.get(pid)
+                    if storico_pid is not None and len(storico_pid) == FINESTRA_STORICO_FRAME:
+                        pid_da_correggere.append(pid)
+                        storici_da_correggere.append(storico_pid)
+                if pid_da_correggere:
+                    storico_batch = prepara_input(np.array(storici_da_correggere, dtype=np.float32))
+                    with torch.no_grad():
+                        correzioni = modello_correzione_ai(torch.from_numpy(storico_batch)).numpy()
+                    correzioni_ai = dict(zip(pid_da_correggere, correzioni))
+
             mappa_pesi_render = {}  # chiavi in sottocelle (griglia fine), solo per la macchia/il disegno
-            for traccia in tracciamento_lidar.values():
+            for pid, traccia in tracciamento_lidar.items():
                 # persona davvero ferma (stato noto dalla simulazione, non stimato dal rumore): niente
                 # proiezione in avanti ne' orientamento, altrimenti anche un residuo di rumore verrebbe
                 # amplificato di PREVISIONE_BLOB_FRAME volte e la macchia si sposterebbe/orienterebbe
@@ -1330,6 +1413,10 @@ def main():
                 frame_futuri_effettivi = 0 if e_ferma else PREVISIONE_BLOB_FRAME
                 direzione_traccia = None if e_ferma else (traccia["vx"], traccia["vy"])
                 x_prev, y_prev = previsione_posizione_kalman(traccia, frame_futuri_effettivi)
+                correzione = correzioni_ai.get(pid)
+                if correzione is not None:
+                    x_prev += float(correzione[0])
+                    y_prev += float(correzione[1])
                 rf_prev = max(0, min(y_tot_fine - 1, int(y_prev // dim_sottocella)))
                 cf_prev = max(0, min(x_tot_fine - 1, int(x_prev // dim_sottocella)))
                 # combinazione (non massimo) fra gli ellissoidi di persone diverse: dove si sovrappongono
@@ -1409,6 +1496,7 @@ def main():
             pool_persone.terminate()
             pool_persone = _crea_pool_persone(griglia)
             muri_modificati = False
+            richiesta_percorsi_pendente = None  # risultati del pool appena terminato: ormai invalidi
 
         # ricalcolo percorsi: fase separata dal movimento cosi' il batch di chi deve ricalcolare in
         # questo frame puo' essere dispacciato in blocco al pool di processi persistente (paralleliz-
@@ -1432,16 +1520,31 @@ def main():
             persone_da_ricalcolare.append(p)
             batch_richieste.append(((p["x"], p["y"]), p["target"], p["rumore_seed"], celle_bloccate_comune))
 
-        if batch_richieste:
-            if pool_persone is not None and not muri_modificati:
-                risultati_percorsi = pool_persone.map(_pool_calcola_percorso, batch_richieste)
-            else:
-                risultati_percorsi = [
-                    algoritmo_a_star(griglia, inizio, target, rumore_seed=seed, celle_bloccate=bloccate)
-                    for inizio, target, seed, bloccate in batch_richieste
-                ]
-            for p, percorso_calcolato in zip(persone_da_ricalcolare, risultati_percorsi):
+        # mentre i muri sono "sporchi" (si sta disegnando: vedi il commento sopra la ricreazione del pool)
+        # si salta del tutto il ricalcolo di questo frame invece di ricadere sul calcolo sequenziale nel
+        # thread principale: con molte persone, ricalcolare uno alla volta ad ogni frame di trascinamento
+        # del tasto W causava un impuntamento evidente. Chi aspettava un ricalcolo lo ottiene comunque al
+        # turno successivo (al massimo una manciata di frame dopo che il disegno si ferma), nel frattempo
+        # resta semplicemente fermo sull'ultimo percorso valido invece di intasare il frame corrente
+
+        # raccolta ASINCRONA del batch precedente, se pronto: su mappe intricate un singolo A* esplora
+        # molti piu' nodi per aggirare i muri rispetto a uno spazio aperto, quindi il batch puo' impiegare
+        # piu' di un frame a tornare. Con .map() (bloccante) l'intero gioco si fermava fino al risultato
+        # piu' lento del batch, causando lo scatto periodico che si vede sulle mappe con molti ostacoli.
+        # Con .map_async() il loop principale continua a girare a piena velocita' mentre i worker
+        # calcolano in sottofondo: i risultati si applicano appena pronti, nel frattempo ciascuna persona
+        # resta sul suo ultimo percorso valido (stesso principio di tolleranza gia' usato sopra)
+        if richiesta_percorsi_pendente is not None and richiesta_percorsi_pendente.ready():
+            for p, percorso_calcolato in zip(persone_richiesta_percorsi_pendente, richiesta_percorsi_pendente.get()):
                 p["percorso"] = percorso_calcolato
+            richiesta_percorsi_pendente = None
+
+        # un nuovo batch parte solo se il precedente e' gia' stato raccolto: chi resta escluso perche' il
+        # pool e' ancora occupato riprovera' al proprio prossimo turno periodico, senza accumulare batch
+        # concorrenti sullo stesso pool
+        if batch_richieste and not muri_modificati and richiesta_percorsi_pendente is None:
+            richiesta_percorsi_pendente = pool_persone.map_async(_pool_calcola_percorso, batch_richieste)
+            persone_richiesta_percorsi_pendente = persone_da_ricalcolare
 
         for p in tutte_mobili:
             if p["stato"] == "movimento":
@@ -1630,6 +1733,11 @@ def main():
             aiuto_txt = font.render(msg, True, ROSSO)
             screen.blit(aiuto_txt, (10, 10))
 
+        if messaggio_mappa_training_timer > 0:
+            messaggio_mappa_training_timer -= 1
+            msg_txt = font.render(messaggio_mappa_training_testo, True, VERDE)
+            screen.blit(msg_txt, (10, 40))
+
         # 5. Overlay richiesta password (salvataggio F5)
         if errore_timer > 0:
             errore_timer -= 1
@@ -1772,6 +1880,12 @@ def main():
             handle_definizione_x = slider_definizione_rect.x + int(rel_definizione * slider_definizione_rect.width)
             pygame.draw.circle(screen, COLORE_BLOB_PROBABILITA, (handle_definizione_x, slider_definizione_rect.centery), 9)
 
+            ai_label = "Correzione AI (previsione)" if modello_ai_disponibile else "Correzione AI - modello non trovato"
+            ai_txt = font.render(ai_label, True, NERO if modello_ai_disponibile else GRIGIO)
+            screen.blit(ai_txt, (panel_rect.x + 15, panel_rect.y + 610))
+            pygame.draw.rect(screen, VERDE if (ai_attiva and modello_ai_disponibile) else BIANCO, checkbox_ai_rect)
+            pygame.draw.rect(screen, NERO, checkbox_ai_rect, 2)
+
             # pulsanti in fondo al pannello: salvano/azzerano su disco la configurazione (numeri, raggi,
             # toggle, velocita'), cosi' l'ambiente di test preferito e' pronto ad ogni riavvio del gioco
             pygame.draw.rect(screen, VERDE, button_salva_config_rect)
@@ -1793,7 +1907,7 @@ def main():
                 configurazione_salvataggio_timer -= 1
                 testo_messaggio, colore_messaggio = configurazione_messaggio
                 conferma_txt = font_piccolo.render(testo_messaggio, True, colore_messaggio)
-                screen.blit(conferma_txt, (panel_rect.x + 15, panel_rect.y + 617))
+                screen.blit(conferma_txt, (panel_rect.x + 15, panel_rect.y + 657))
 
         pygame.display.flip()
         clock.tick(60)
