@@ -49,15 +49,23 @@ def _nuovo_target(griglia):
     return sim.cella_libera_casuale(griglia)
 
 
-def _aggiorna_robot(stato, griglia):
-    """Il robot gira fra punti casuali della mappa: qui non e' soggetto di studio, serve solo a dare
-    al lidar molte posizioni/angolazioni diverse da cui osservare le persone - nessuna logica di
-    costo/probabilita', solo A* diretto verso il prossimo punto."""
+def _aggiorna_robot(stato, griglia, tracciamento_lidar):
+    """Il robot gira fra punti casuali della mappa: qui il PERCORSO non e' soggetto di studio (serve solo
+    a dare al lidar molte posizioni/angolazioni diverse da cui osservare le persone), quindi resta A*
+    diretto senza costo di probabilita'/AI. La VELOCITA' pero' replica il controllo predittivo di main.py
+    (stessa fattore_velocita_da_conflitto): la velocita' del robot cambia dove si trova nello spazio nel
+    tempo, e quindi quando/quanto spinge via le persone vicine (repulsione_punto) - un robot che si muove
+    diversamente da quello vero e' un'altra fonte di scarto fra i dati di training e il comportamento dal
+    vivo, lo stesso principio per cui _muovi_e_gestisci_stato replica il blocco 'Movimento' di main.py."""
     if not stato["percorso"]:
         nodo = _nuovo_target(griglia)
         stato["nodo_target"] = nodo
         stato["percorso"] = sim.algoritmo_a_star(griglia, (stato["x"], stato["y"]), (nodo.r, nodo.c))
-    x, y, arrivato, bloccato = sim.passo_movimento(stato["x"], stato["y"], stato["percorso"], sim.VELOCITA_ROBOT, stato["nodo_target"], griglia)
+    velocita_nominale = sim.VELOCITA_ROBOT
+    fattore = sim.fattore_velocita_da_conflitto(
+        stato["x"], stato["y"], stato["percorso"], tracciamento_lidar, velocita_nominale,
+        sim.RAGGIO_ROBOT_DEFAULT, sim.RAGGIO_PERSONA_DEFAULT)
+    x, y, arrivato, bloccato = sim.passo_movimento(stato["x"], stato["y"], stato["percorso"], velocita_nominale * fattore, stato["nodo_target"], griglia)
     stato["x"], stato["y"] = x, y
     if bloccato or arrivato:
         stato["percorso"] = []
@@ -242,7 +250,9 @@ def esegui_scenario(nome_mappa, nome_densita, nome_mix, num_frame, seed):
     range_evitamento_robot = sim.RAGGIO_ROBOT_DEFAULT + sim.RAGGIO_PERSONA_DEFAULT
 
     for contatore_frame in range(num_frame):
-        _aggiorna_robot(stato_robot, griglia)
+        # posizione del robot dall'inizio del frame (= fine del frame precedente): usata per rilevamento/
+        # repulsione di questo frame, esattamente come in main.py dove il rilevamento lidar precede il
+        # blocco Movimento del robot - il robot si sposta per ultimo, usando le tracce appena aggiornate
         robot_x, robot_y = stato_robot["x"], stato_robot["y"]
 
         celle_persone_ferme = {(pf["r"], pf["c"]) for pf in scenario["persone_ferme"]}
@@ -259,6 +269,8 @@ def esegui_scenario(nome_mappa, nome_densita, nome_mix, num_frame, seed):
         _rileva_e_traccia(tutte_le_persone, robot_x, robot_y, griglia, tracciamento_lidar, storico_posizioni)
         _registra_previsioni(tracciamento_lidar, storico_posizioni, contatore_frame, previsioni_in_sospeso)
         _risolvi_previsioni_mature(previsioni_in_sospeso, contatore_frame, entita_per_pid, campioni, etichetta_scenario)
+
+        _aggiorna_robot(stato_robot, griglia, tracciamento_lidar)
 
     return nome_mappa, nome_densita, nome_mix, len(tutte_le_persone), campioni
 

@@ -174,6 +174,39 @@ def _carica_mappe_training():
 
 MAPPE.update(_carica_mappe_training())
 
+
+# --- MAPPE DI TEST: tenute FUORI da MAPPE apposta, mai toccate da genera_dataset_previsione.py (che scandisce
+# solo MAPPE). Servono per valutare il modello/il robot su ambienti che non ha mai incontrato in nessuna
+# forma durante il training - una prova di generalizzazione piu' forte del semplice "combinazione di
+# densita'/mix mai vista", che comunque riusa mappe gia' presenti nel training in altre configurazioni. Gli
+# script di valutazione (verifica_beneficio_ai.py, ecc.) puntano a MAPPE_TEST, non a MAPPE.
+
+def mappa_piazza(griglia):
+    """Arena vuota (solo i bordi), come mappa_aperta ma tenuta apposta fuori da MAPPE: rappresenta il caso
+    piu' semplice (nessun ostacolo strutturale) fra le mappe di valutazione mai viste in training."""
+    pass
+
+
+MAPPE_TEST = {
+    "piazza": mappa_piazza,
+}
+
+
+def _carica_mappe_testing():
+    """Come _carica_mappe_training ma per mappe_testing/ (mappe disegnate a mano apposta per la
+    valutazione, mai usate per generare dati di training) - stesso meccanismo di auto-scoperta, dizionario
+    diverso."""
+    mappe_extra = {}
+    if os.path.isdir(sim.CARTELLA_MAPPE_TESTING):
+        for nome_file in sorted(os.listdir(sim.CARTELLA_MAPPE_TESTING)):
+            if nome_file.endswith(".json"):
+                nome_mappa = "testing_" + os.path.splitext(nome_file)[0]
+                mappe_extra[nome_mappa] = _costruttore_da_file(os.path.join(sim.CARTELLA_MAPPE_TESTING, nome_file))
+    return mappe_extra
+
+
+MAPPE_TEST.update(_carica_mappe_testing())
+
 # --- LIVELLI DI DIFFICOLTA': densita' (scala) x mix comportamentale (prevedibilita') ---
 # le mappe disegnate a mano hanno aree libere molto diverse fra loro (una piazza aperta contro una stanza
 # piccola e articolata): usare un conteggio assoluto di persone renderebbe "denso" tutt'altro che
@@ -197,27 +230,47 @@ LIVELLI_DENSITA = {
 # scala numero_gruppi_base: i gruppi (membri che si rincorrono/accelerano) e l'alta densita' sono i principali
 # responsabili di moto non lineare (imprevedibile per un Kalman a velocita' costante), piu' dei semplici
 # corridori (che vanno piu' veloci ma in modo altrettanto rettilineo se non devono schivare nessuno).
+#
+# "regolare"/"misto"/"caotico" restano le proporzioni realistiche (nella vita vera i gruppi sono la minoranza,
+# persone/corridori la maggioranza): sono la distribuzione principale su cui il modello si allena. I tre mix
+# "solo_*" isolano invece una categoria alla volta al massimo, con le altre ridotte a una presenza minima -
+# casi rari nella realta' ma che senza uno scenario dedicato il modello non vedrebbe mai, e su cui altrimenti
+# potrebbe comportarsi in modo imprevedibile la prima volta che capitano.
 MIX_COMPORTAMENTALE = {
     "regolare": {"prop_normali": 0.85, "prop_corridori": 0.05, "prop_ferme": 0.10, "moltiplicatore_gruppi": 0.5},
     "misto": {"prop_normali": 0.60, "prop_corridori": 0.20, "prop_ferme": 0.10, "moltiplicatore_gruppi": 1.0},
     "caotico": {"prop_normali": 0.40, "prop_corridori": 0.35, "prop_ferme": 0.05, "moltiplicatore_gruppi": 2.0},
+    "solo_corridori": {"prop_normali": 0.15, "prop_corridori": 0.80, "prop_ferme": 0.05, "moltiplicatore_gruppi": 0.1},
+    "solo_gruppi": {"prop_normali": 0.55, "prop_corridori": 0.05, "prop_ferme": 0.05, "moltiplicatore_gruppi": 4.0},
+    "solo_ferme": {"prop_normali": 0.20, "prop_corridori": 0.05, "prop_ferme": 0.75, "moltiplicatore_gruppi": 0.1},
 }
 
 
 def costruisci_scenario(nome_mappa, nome_densita, nome_mix, seed=None):
     """Costruisce griglia + persone/corridori/persone_ferme/gruppi per la combinazione richiesta. Con lo
-    stesso seed la composizione (chi/quanti) e' riproducibile; senza seed usa lo stato casuale corrente."""
+    stesso seed la composizione (chi/quanti) e' riproducibile; senza seed usa lo stato casuale corrente.
+    'nome_densita' accetta anche un dizionario {"budget_individui":..., "numero_gruppi_base":...} al posto
+    di un nome di LIVELLI_DENSITA: usato da verifica_densita_massima.py per uno sweep di densita' oltre i
+    tre preset, senza doverli aggiungere a LIVELLI_DENSITA (che resta la lista usata per generare il
+    dataset di training - aggiungere li' altri livelli farebbe crescere inutilmente le combinazioni).
+    'nome_mappa' cerca sia in MAPPE (usate anche per il training) sia in MAPPE_TEST (tenute apposta fuori
+    dal training, vedi il commento sopra la definizione di MAPPE_TEST): la funzione non distingue le due
+    origini, sono chi la chiama (genera_dataset_previsione.py vs gli script di valutazione) a scegliere
+    consapevolmente da quale dizionario pescare i nomi delle mappe."""
     if seed is not None:
         random.seed(seed)
 
     griglia = [[sim.Nodo(r, c) for c in range(sim.X_TOT)] for r in range(sim.Y_TOT)]
     sim.crea_bordi(griglia)
-    MAPPE[nome_mappa](griglia)
+    costruttore_mappa = MAPPE.get(nome_mappa) or MAPPE_TEST.get(nome_mappa)
+    if costruttore_mappa is None:
+        raise KeyError(f"Mappa '{nome_mappa}' non trovata ne' in MAPPE ne' in MAPPE_TEST")
+    costruttore_mappa(griglia)
 
     celle_libere = sum(1 for riga in griglia for n in riga if n.tipo == "libero")
     fattore_area = celle_libere / CELLE_LIBERE_RIFERIMENTO
 
-    densita = LIVELLI_DENSITA[nome_densita]
+    densita = LIVELLI_DENSITA[nome_densita] if isinstance(nome_densita, str) else nome_densita
     mix = MIX_COMPORTAMENTALE[nome_mix]
     budget = densita["budget_individui"] * fattore_area
     totale_prop = mix["prop_normali"] + mix["prop_corridori"] + mix["prop_ferme"]
