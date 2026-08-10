@@ -16,6 +16,7 @@ Uso:
 """
 import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # la radice del progetto: main.py e training_scenari.py stanno li'
 import time
 import numpy as np
 import torch
@@ -33,6 +34,16 @@ DIMENSIONE_NASCOSTA = 32
 NUMERO_EPOCHE = 60
 DIMENSIONE_BATCH = 256
 TASSO_APPRENDIMENTO = 1e-3
+
+# --- MODELLO SPECIALIZZATO (dataset di un solo ambiente, densita' di esercizio, passo accelerato) ---
+# File separato apposta: il modello a passo normale resta quello caricato da main.py per la simulazione
+# interattiva, che gira a passo 1. Un modello allenato a passo accelerato non e' intercambiabile con
+# quello, perche' vede posizioni e velocita' scalate - tenerli distinti evita di romperne uno per usare
+# l'altro. Rete piu' grande e training piu' lungo: il dataset specializzato e' concentrato su un solo
+# ambiente, quindi c'e' piu' struttura ripetuta da sfruttare e meno varieta' da dover generalizzare.
+FILE_MODELLO_SPECIALIZZATO = os.path.join(CARTELLA_MODELLI, "correzione_kalman_specializzato.pt")
+DIMENSIONE_NASCOSTA_SPECIALIZZATO = 96
+NUMERO_EPOCHE_SPECIALIZZATO = 150
 
 
 class CorrezioneKalman(nn.Module):
@@ -77,7 +88,8 @@ def errori_statistiche(previsioni, verita):
     return errori.mean(), np.median(errori), np.percentile(errori, 90)
 
 
-def main(path_dataset):
+def main(path_dataset, file_modello=FILE_MODELLO, dimensione_nascosta=DIMENSIONE_NASCOSTA,
+         numero_epoche=NUMERO_EPOCHE):
     print(f"Carico dataset: {path_dataset}")
     storico, pred_kalman, verita, scenario = carica_dataset(path_dataset)
     n = len(verita)
@@ -98,13 +110,14 @@ def main(path_dataset):
     y_train = torch.tensor(residuo[maschera_train], dtype=torch.float32, device=device)
     x_test = torch.tensor(storico_norm[maschera_test], dtype=torch.float32, device=device)
 
-    modello = CorrezioneKalman().to(device)
+    modello = CorrezioneKalman(dimensione_nascosta=dimensione_nascosta).to(device)
+    print(f"Rete: GRU a {dimensione_nascosta} unita' nascoste, {numero_epoche} epoche\n")
     ottimizzatore = torch.optim.Adam(modello.parameters(), lr=TASSO_APPRENDIMENTO)
     funzione_perdita = nn.MSELoss()
 
     n_train = x_train.shape[0]
     inizio = time.time()
-    for epoca in range(NUMERO_EPOCHE):
+    for epoca in range(numero_epoche):
         modello.train()
         permutazione = torch.randperm(n_train, device=device)
         perdita_totale = 0.0
@@ -118,7 +131,7 @@ def main(path_dataset):
             ottimizzatore.step()
             perdita_totale += perdita.item() * len(indici)
         if (epoca + 1) % 10 == 0 or epoca == 0:
-            print(f"  epoca {epoca + 1}/{NUMERO_EPOCHE}: loss train {perdita_totale / n_train:.1f}")
+            print(f"  epoca {epoca + 1}/{numero_epoche}: loss train {perdita_totale / n_train:.1f}")
 
     print(f"\nTraining completato in {time.time() - inizio:.1f}s\n")
 
@@ -139,12 +152,45 @@ def main(path_dataset):
     miglioramento = (1 - err_corretto[0] / err_kalman[0]) * 100
     print(f"\nMiglioramento errore medio: {miglioramento:+.1f}%")
 
+    # --- Quanto "pesa" la correzione rispetto alla griglia su cui decide l'A* ---
+    # Il guadagno di precisione qui sopra e' in pixel, ma il costo di probabilita' entra nell'A* per CELLE
+    # da DIM_NODO px: una correzione molto piu' piccola di una cella sposta la macchia dentro la stessa
+    # cella e non cambia nessuna decisione di percorso, per quanto sia accurata. Se la quota sotto e'
+    # bassa, il collo di bottiglia non e' il modello ma la quantizzazione della griglia, e allenare di
+    # piu' non servirebbe a niente.
+    import main as _sim  # import locale: serve solo per DIM_NODO, e allena_previsione gira anche senza pygame inizializzato
+    modulo_correzione = np.linalg.norm(correzione_test, axis=1)
+    quota_mezza_cella = (modulo_correzione > _sim.DIM_NODO / 2).mean() * 100
+    quota_cella = (modulo_correzione > _sim.DIM_NODO).mean() * 100
+    print(f"\n=== Ampiezza della correzione rispetto alla griglia (cella = {_sim.DIM_NODO}px) ===")
+    print(f"Correzione media {modulo_correzione.mean():.1f}px, mediana {np.median(modulo_correzione):.1f}px, "
+          f"90-esimo percentile {np.percentile(modulo_correzione, 90):.1f}px")
+    print(f"Correzioni oltre mezza cella: {quota_mezza_cella:.1f}%  |  oltre una cella intera: {quota_cella:.1f}%")
+    if quota_mezza_cella < 10:
+        print("ATTENZIONE: quasi tutte le correzioni sono sotto-cella, quindi vengono assorbite dalla\n"
+              "quantizzazione della griglia e difficilmente cambieranno il percorso scelto dall'A*.")
+
     os.makedirs(CARTELLA_MODELLI, exist_ok=True)
-    torch.save(modello.state_dict(), FILE_MODELLO)
-    print(f"\nModello salvato in: {FILE_MODELLO}")
+    torch.save(modello.state_dict(), file_modello)
+    print(f"\nModello salvato in: {file_modello}")
 
 
 if __name__ == "__main__":
+    if "--specializzato" in sys.argv:
+        # Allena il modello specializzato su un solo ambiente/densita' di esercizio, salvandolo in un file
+        # separato: quello a passo normale resta valido per la simulazione interattiva (vedi il commento
+        # su FILE_MODELLO_SPECIALIZZATO)
+        argomenti = [a for a in sys.argv[1:] if not a.startswith("--")]
+        path_dataset = argomenti[0] if argomenti else os.path.join(CARTELLA_DATASET, "dataset_previsione_specializzato_5x.npz")
+        if not os.path.exists(path_dataset):
+            print(f"Dataset specializzato non trovato: {path_dataset}\n"
+                  f"Generalo prima con: py genera_dataset_previsione.py --specializzato")
+            sys.exit(1)
+        main(path_dataset, file_modello=FILE_MODELLO_SPECIALIZZATO,
+             dimensione_nascosta=DIMENSIONE_NASCOSTA_SPECIALIZZATO,
+             numero_epoche=NUMERO_EPOCHE_SPECIALIZZATO)
+        sys.exit(0)
+
     path_dataset = sys.argv[1] if len(sys.argv) > 1 else None
     if path_dataset is None:
         candidato_completo = os.path.join(CARTELLA_DATASET, "dataset_previsione.npz")

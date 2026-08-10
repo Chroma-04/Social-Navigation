@@ -179,7 +179,7 @@ MAPPE.update(_carica_mappe_training())
 # solo MAPPE). Servono per valutare il modello/il robot su ambienti che non ha mai incontrato in nessuna
 # forma durante il training - una prova di generalizzazione piu' forte del semplice "combinazione di
 # densita'/mix mai vista", che comunque riusa mappe gia' presenti nel training in altre configurazioni. Gli
-# script di valutazione (verifica_beneficio_ai.py, ecc.) puntano a MAPPE_TEST, non a MAPPE.
+# script di valutazione (testing.py) puntano a MAPPE_TEST, non a MAPPE.
 
 def mappa_piazza(griglia):
     """Arena vuota (solo i bordi), come mappa_aperta ma tenuta apposta fuori da MAPPE: rappresenta il caso
@@ -271,7 +271,11 @@ def costruisci_scenario(nome_mappa, nome_densita, nome_mix, seed=None):
     fattore_area = celle_libere / CELLE_LIBERE_RIFERIMENTO
 
     densita = LIVELLI_DENSITA[nome_densita] if isinstance(nome_densita, str) else nome_densita
-    mix = MIX_COMPORTAMENTALE[nome_mix]
+    # come per la densita', 'nome_mix' accetta anche un dizionario grezzo con le stesse chiavi di
+    # MIX_COMPORTAMENTALE: serve a definire proporzioni su misura (vedi la modalita' specializzata di
+    # genera_dataset_previsione.py) senza doverle aggiungere alla tabella condivisa, che e' anche la lista
+    # scandita da tutte_le_combinazioni()
+    mix = MIX_COMPORTAMENTALE[nome_mix] if isinstance(nome_mix, str) else nome_mix
     budget = densita["budget_individui"] * fattore_area
     totale_prop = mix["prop_normali"] + mix["prop_corridori"] + mix["prop_ferme"]
     numero_persone = max(0, round(budget * mix["prop_normali"] / totale_prop))

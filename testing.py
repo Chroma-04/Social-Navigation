@@ -1,0 +1,499 @@
+"""VALIDAZIONE APPAIATA: quanto guadagna il robot con la correzione AI + controllo predittivo di velocita'.
+
+Confronta due robot sulla stessa identica traversata:
+    "prima"  solo Kalman, velocita' costante   (il robot ante-tesi)
+    "dopo"   Kalman + correzione AI + velocita' predittiva sugli incroci
+
+DISEGNO SPERIMENTALE - numeri casuali comuni (paired test)
+Ogni replica ha un seed: con lo stesso seed le due condizioni partono dalla folla IDENTICA (stesse
+posizioni iniziali, stesse destinazioni, stessa composizione dei gruppi). L'unica differenza e' il robot.
+Cosi' la varianza fra scenari diversi - che e' enorme, e che in un confronto non appaiato richiede
+decine di repliche per essere mediata via - esce dal confronto, e si misura direttamente la differenza
+attribuibile all'AI. Le traiettorie poi divergono comunque (un robot che rallenta spinge via le persone
+in modo diverso), ma partire dalla stessa configurazione rende il test molto piu' sensibile a parita' di
+repliche. E' la tecnica standard di riduzione della varianza nelle simulazioni.
+
+Si riportano quindi statistiche APPAIATE: differenza media per coppia, e quante coppie vede l'AI vincere.
+La media semplice dei due gruppi resta stampata per riferimento, ma e' la statistica debole.
+
+PERCORSO
+Sempre lo stesso: dalla cella libera piu' vicina all'angolo in alto a sinistra a quella piu' vicina
+all'angolo in basso a destra - la diagonale completa della mappa. Un tragitto lungo attraversa piu' zone
+e piu' incroci di uno breve, quindi mette alla prova la navigazione invece di misurare rumore.
+
+STOP DI SICUREZZA
+Replicato da main.py: se una persona in movimento entra nel raggio di sicurezza, il robot si ferma del
+tutto per quel frame. E' il meccanismo attraverso cui il controllo predittivo di velocita' ripaga -
+rallentare in anticipo serve proprio a NON finire fermi. Senza modellarlo, rallentare sarebbe solo un
+costo senza beneficio possibile e la condizione "dopo" risulterebbe peggiore per costruzione. Il tempo
+passato fermo e' riportato come metrica a se': se l'AI riduce gli stop ma non il tempo totale, si vede.
+
+PASSO TEMPORALE
+ACCELERAZIONE (importata da genera_dataset_previsione, per non poter divergere) alza la distanza
+percorsa per frame e abbassa in proporzione gli orizzonti espressi in frame, cosi' la stessa corsa costa
+N volte meno calcolo. Il modello AI e' legato al passo su cui e' stato allenato - riceve posizioni
+relative e velocita' grezze, che scalano entrambe con l'accelerazione - quindi dataset, training e
+validazione devono condividere lo stesso valore, e qui si carica il modello specializzato corrispondente.
+
+Uso:
+    py testing.py                    sweep completo di popolazione su training_mappa_01
+    py testing.py nome_mappa         sweep su un'altra mappa di MAPPE/MAPPE_TEST
+"""
+import os
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+import sys
+import time
+import math
+import random
+import csv
+import zlib
+import multiprocessing as mp
+import numpy as np
+import torch
+import main as sim
+import training_scenari as ts
+from ai_predittiva.genera_dataset_previsione import (_ricalcola_percorsi, _muovi_e_gestisci_stato, _rileva_e_traccia,
+                                       popolazione_da_totale, ACCELERAZIONE,
+                                       POPOLAZIONE_MIN, POPOLAZIONE_MAX, POPOLAZIONE_PASSO)
+from ai_predittiva.allena_previsione import (CorrezioneKalman, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO,
+                               FILE_MODELLO_SPECIALIZZATO, DIMENSIONE_NASCOSTA, DIMENSIONE_NASCOSTA_SPECIALIZZATO)
+
+CARTELLA_RISULTATI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "risultati_test")
+FILE_RISULTATI_CSV = os.path.join(CARTELLA_RISULTATI, "validazione.csv")
+FILE_COPPIE_CSV = os.path.join(CARTELLA_RISULTATI, "validazione_coppie.csv")  # una riga per singola coppia appaiata, per rifare i conti/grafici a mano
+FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
+
+MAPPA_DEFAULT = "training_mappa_01"
+REPLICHE = 8          # gruppi appaiati (stesso seed, tutte le condizioni) per ogni livello di popolazione
+FRAME_MAX = max(1, 9000 // ACCELERAZIONE)  # 150s equivalenti: oltre, la corsa conta come "non arrivata" invece di proseguire all'infinito
+
+# --- DISEGNO FATTORIALE 2x2 ---
+# I due componenti aggiunti dalla tesi sono indipendenti e vanno misurati separatamente: accendendoli
+# insieme si ottiene un saldo unico, e se uno aiuta mentre l'altro danneggia non si puo' capire quale sia
+# quale. Qui ogni combinazione gira sullo STESSO seed, quindi i confronti sono tutti appaiati fra loro.
+#   nome -> (usa correzione AI sulla mappa di costo, usa controllo predittivo di velocita')
+CONDIZIONI = {
+    "base": (False, False),        # il robot ante-tesi: solo Kalman, velocita' costante
+    "solo_ai": (True, False),      # correzione AI sulla macchia di probabilita', velocita' costante
+    "solo_velocita": (False, True), # velocita' predittiva sopra al Kalman puro, senza correzione AI
+    "completo": (True, True),      # entrambi
+}
+CONDIZIONE_RIFERIMENTO = "base"
+# Per la diagnosi non servono tutti gli 11 livelli: bastano pochi livelli rappresentativi con abbastanza
+# repliche, perche' la domanda ("quale componente paga e quale costa") non dipende da una risoluzione fine
+# in densita'. Lo sweep completo si fa dopo, sulla configurazione che risulta migliore.
+LIVELLI_DIAGNOSTICI = [150, 300, 450]
+
+torch.set_num_threads(1)  # stesso motivo di main.py: batch minuscoli, il multithreading di torch costa piu' di quanto renda
+
+_FRAME_REAZIONE_ORIGINALE = sim.FRAME_REAZIONE_VELOCITA_ROBOT  # valore prima di qualsiasi riscalatura, per ripartire sempre da qui
+_modello_ai_worker = None  # caricato una volta per processo worker, non ad ogni corsa
+
+
+# --------------------------------------------------------------------------------------------------
+# Preparazione dei worker
+# --------------------------------------------------------------------------------------------------
+
+def _inizializza_worker():
+    """Inizializzatore del pool (stesso pattern di main.py): carica il modello una volta sola quando il
+    worker parte, invece che ad ogni corsa. Con ACCELERAZIONE > 1 serve il modello allenato allo stesso
+    passo: quello a passo normale vedrebbe input fuori distribuzione."""
+    global _modello_ai_worker
+    usa_specializzato = ACCELERAZIONE > 1 and os.path.exists(FILE_MODELLO_SPECIALIZZATO)
+    if ACCELERAZIONE > 1 and not usa_specializzato:
+        print(f"ATTENZIONE: accelerazione {ACCELERAZIONE}x ma manca "
+              f"{os.path.basename(FILE_MODELLO_SPECIALIZZATO)}: uso il modello a passo normale, che a "
+              f"questo passo lavora fuori distribuzione. Allenalo con: "
+              f"py allena_previsione.py --specializzato")
+    path = FILE_MODELLO_SPECIALIZZATO if usa_specializzato else FILE_MODELLO
+    dimensione = DIMENSIONE_NASCOSTA_SPECIALIZZATO if usa_specializzato else DIMENSIONE_NASCOSTA
+    modello = CorrezioneKalman(dimensione_nascosta=dimensione)
+    modello.load_state_dict(torch.load(path, map_location="cpu"))
+    modello.eval()
+    _modello_ai_worker = modello
+
+
+# --------------------------------------------------------------------------------------------------
+# Una singola corsa
+# --------------------------------------------------------------------------------------------------
+
+def _cella_vicina_angolo(griglia, r_angolo, c_angolo):
+    """Cella libera piu' vicina all'angolo indicato: gli angoli veri sono muro (bordo della mappa)."""
+    libere = [n for riga in griglia for n in riga if n.tipo == "libero"]
+    return min(libere, key=lambda n: (n.r - r_angolo) ** 2 + (n.c - c_angolo) ** 2)
+
+
+def _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello_ai, orizzonte):
+    """Ricostruisce la macchia di probabilita' come in main.py (un solo batch per la correzione AI,
+    stessa ottimizzazione), sulla griglia di movimento invece che sulla sotto-griglia fine del rendering.
+    Le persone ferme non vengono proiettate nel futuro: restano dove sono."""
+    correzioni_ai = {}
+    if usa_ai:
+        pid_ok, storici_ok = [], []
+        for pid, traccia in tracciamento_lidar.items():
+            if traccia.get("ferma", False):
+                continue
+            storico = storico_posizioni.get(pid)
+            if storico is not None and len(storico) == FINESTRA_STORICO_FRAME:
+                pid_ok.append(pid)
+                storici_ok.append(storico)
+        if pid_ok:
+            batch = prepara_input(np.array(storici_ok, dtype=np.float32))
+            with torch.no_grad():
+                correzioni = modello_ai(torch.from_numpy(batch)).numpy()
+            correzioni_ai = dict(zip(pid_ok, correzioni))
+
+    costi = {}
+    for pid, traccia in tracciamento_lidar.items():
+        e_ferma = traccia.get("ferma", False)
+        frame_futuri = 0 if e_ferma else orizzonte
+        direzione = None if e_ferma else (traccia["vx"], traccia["vy"])
+        x_prev, y_prev = sim.previsione_posizione_kalman(traccia, frame_futuri)
+        correzione = correzioni_ai.get(pid)
+        if correzione is not None:
+            x_prev += float(correzione[0])
+            y_prev += float(correzione[1])
+        rf = max(0, min(sim.Y_TOT - 1, int(y_prev // sim.DIM_NODO)))
+        cf = max(0, min(sim.X_TOT - 1, int(x_prev // sim.DIM_NODO)))
+        macchia = sim.macchia_diffusione(griglia, rf, cf, sim.RAGGIO_BLOB_CELLE, sim.DECADIMENTO_BLOB, 1,
+                                         direzione=direzione)
+        for cella, peso in macchia.items():
+            costo = peso * sim.COSTO_MASSIMO_PROBABILITA
+            if cella not in costi or costi[cella] < costo:
+                costi[cella] = costo
+    return costi
+
+
+def esegui_corsa(nome_mappa, condizione, popolazione, seed):
+    """Una traversata angolo->angolo. 'condizione': 'prima' = solo Kalman a velocita' costante,
+    'dopo' = Kalman + correzione AI + velocita' predittiva. Con lo stesso 'seed' la folla iniziale e'
+    identica fra le due condizioni (vedi il disegno sperimentale in testa al file).
+
+    Ritorna (arrivato, frame_impiegati, frame_fermo_sicurezza); frame_impiegati vale FRAME_MAX se non e'
+    arrivato entro il tetto."""
+    usa_ai, usa_velocita = CONDIZIONI[condizione]
+    if usa_ai and _modello_ai_worker is None:
+        _inizializza_worker()  # chiamata diretta fuori dal pool (test manuali): l'inizializzatore non e' mai girato
+    modello_ai = _modello_ai_worker if usa_ai else None
+
+    random.seed(seed)
+
+    # --- ambiente e folla ---
+    griglia = [[sim.Nodo(r, c) for c in range(sim.X_TOT)] for r in range(sim.Y_TOT)]
+    sim.crea_bordi(griglia)
+    costruttore = ts.MAPPE.get(nome_mappa) or ts.MAPPE_TEST.get(nome_mappa)
+    if costruttore is None:
+        raise KeyError(f"Mappa '{nome_mappa}' non trovata ne' in MAPPE ne' in MAPPE_TEST")
+    costruttore(griglia)
+
+    persone = [sim.crea_persona(griglia) for _ in range(popolazione["numero_persone"])]
+    corridori = [sim.crea_corridore(griglia) for _ in range(popolazione["numero_corridori"])]
+    persone_ferme = [sim.crea_persona_ferma(griglia) for _ in range(popolazione["numero_persone_ferme"])]
+    gruppi = [sim.crea_gruppo(griglia) for _ in range(popolazione["numero_gruppi"])]
+    raggio_sicurezza = popolazione.get("raggio_sicurezza", sim.RAGGIO_SICUREZZA_DEFAULT)
+    raggio_robot = popolazione.get("raggio_robot", sim.RAGGIO_ROBOT_DEFAULT)
+    raggio_persona = popolazione.get("raggio_persona", sim.RAGGIO_PERSONA_DEFAULT)
+    # _rileva_e_traccia legge RAGGIO_LIDAR_DEFAULT dal modulo (codice condiviso): si riscrive il valore
+    # in questo processo di test, senza modificare main.py - i worker sono processi separati
+    sim.RAGGIO_LIDAR_DEFAULT = popolazione.get("raggio_lidar", sim.RAGGIO_LIDAR_DEFAULT)
+
+    membri_mobili = [m for g in gruppi if g["mobile"] for m in g["membri"]]
+    membri_fermi = [m for g in gruppi if not g["mobile"] for m in g["membri"]]
+    tutte_mobili = persone + corridori + membri_mobili
+    tutte_le_persone = tutte_mobili + persone_ferme + membri_fermi
+    celle_ferme = {(pf["r"], pf["c"]) for pf in persone_ferme}
+    celle_ferme |= {(m["r"], m["c"]) for m in membri_fermi}
+
+    # accelerazione: come main.py col cursore "Velocita simulazione", ma applicata moltiplicando
+    # fattore_velocita invece di toccare _muovi_e_gestisci_stato (che e' codice condiviso)
+    for p in tutte_mobili:
+        p["fattore_velocita"] *= ACCELERAZIONE
+
+    # orizzonti in frame, riscalati: a passo accelerato "un secondo nel futuro" sono meno frame. Senza
+    # questa divisione la previsione proietterebbe le persone ACCELERAZIONE volte troppo avanti, fuori
+    # mappa, e la macchia di probabilita' diventerebbe rumore per ENTRAMBE le condizioni
+    orizzonte_previsione = max(1, sim.PREVISIONE_BLOB_FRAME // ACCELERAZIONE)
+    intervallo_ricalcolo = max(1, sim.INTERVALLO_RICALCOLO_ROBOT_FRAME // ACCELERAZIONE)
+    intervallo_macchia = max(1, sim.INTERVALLO_AGGIORNAMENTO_MACCHIA_FRAME // ACCELERAZIONE)
+    # letto dentro fattore_velocita_da_conflitto (codice condiviso col robot vero): si riscala il valore
+    # del modulo in questo processo di test, senza modificare main.py - i worker sono processi separati
+    sim.FRAME_REAZIONE_VELOCITA_ROBOT = max(1, _FRAME_REAZIONE_ORIGINALE // ACCELERAZIONE)
+
+    # --- robot ---
+    partenza = _cella_vicina_angolo(griglia, 0, 0)
+    arrivo = _cella_vicina_angolo(griglia, sim.Y_TOT - 1, sim.X_TOT - 1)
+    robot = {"x": partenza.cx, "y": partenza.cy, "percorso": []}
+    tracciamento_lidar, storico_posizioni = {}, {}
+
+    range_evitamento_quad = sim.RANGE_EVITAMENTO_PERSONE ** 2
+    range_evitamento_robot = raggio_robot + raggio_persona
+    velocita_nominale = sim.VELOCITA_ROBOT * ACCELERAZIONE
+
+    costi = {}
+    frame_fermo = 0
+    for contatore_frame in range(FRAME_MAX):
+        robot_x, robot_y = robot["x"], robot["y"]
+
+        celle_bloccate = {(int(p["y"] // sim.DIM_NODO), int(p["x"] // sim.DIM_NODO)) for p in tutte_mobili}
+        celle_bloccate |= celle_ferme
+        celle_bloccate_comune = celle_bloccate | {(int(robot_y // sim.DIM_NODO), int(robot_x // sim.DIM_NODO))}
+
+        _ricalcola_percorsi(tutte_mobili, contatore_frame, griglia, celle_bloccate_comune)
+        griglia_spaziale = sim.costruisci_griglia_spaziale(tutte_mobili, sim.DIM_NODO)
+        _muovi_e_gestisci_stato(tutte_mobili, griglia, griglia_spaziale, robot_x, robot_y,
+                                range_evitamento_quad, range_evitamento_robot)
+        _rileva_e_traccia(tutte_le_persone, robot_x, robot_y, griglia, tracciamento_lidar, storico_posizioni)
+
+        if contatore_frame % intervallo_macchia == 0:
+            costi = _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello_ai,
+                                 orizzonte_previsione)
+
+        if not robot["percorso"] or contatore_frame % intervallo_ricalcolo == 0:
+            robot["percorso"] = sim.algoritmo_a_star(griglia, (robot["x"], robot["y"]), (arrivo.r, arrivo.c),
+                                                     celle_bloccate=celle_bloccate, mappa_costo_extra=costi)
+
+        # stop di sicurezza, identico a main.py: una persona in movimento troppo vicina blocca del tutto
+        # il robot per questo frame (vedi il commento in testa al file sul perche' e' essenziale)
+        if raggio_sicurezza > 0 and any(math.hypot(robot["x"] - p["x"], robot["y"] - p["y"]) < raggio_sicurezza
+                                        for p in tutte_mobili):
+            frame_fermo += 1
+            continue
+
+        fattore = 1.0
+        if usa_velocita:
+            fattore = sim.fattore_velocita_da_conflitto(
+                robot["x"], robot["y"], robot["percorso"], tracciamento_lidar, velocita_nominale,
+                raggio_robot, raggio_persona)
+
+        x, y, arrivato, bloccato = sim.passo_movimento(robot["x"], robot["y"], robot["percorso"],
+                                                       velocita_nominale * fattore, arrivo, griglia)
+        robot["x"], robot["y"] = x, y
+        if bloccato:
+            robot["percorso"] = []
+        if arrivato:
+            return True, contatore_frame + 1, frame_fermo
+
+    return False, FRAME_MAX, frame_fermo
+
+
+def _esegui_gruppo(argomenti):
+    """Un GRUPPO appaiato: tutte le condizioni di CONDIZIONI sullo stesso seed, nello stesso processo e
+    una dopo l'altra. Tenerle insieme invece di dispacciarle come task separati garantisce che il gruppo
+    sia sempre completo (nessuna condizione persa) e che tutte vedano lo stesso stato iniziale.
+    L'ordine e' ininfluente: ogni corsa riparte da random.seed(seed) e ricostruisce mappa, folla e robot
+    da zero, quindi nessuno stato passa dall'una all'altra. Verificato empiricamente: la stessa corsa con
+    lo stesso seed da' risultati identici al frame, indipendentemente da cosa e' girato prima."""
+    nome_mappa, popolazione, totale, seed = argomenti
+    risultati = {}
+    for condizione in CONDIZIONI:
+        arrivato, frame, fermo = esegui_corsa(nome_mappa, condizione, popolazione, seed)
+        risultati[condizione] = (arrivato, frame, fermo)
+    return totale, seed, risultati
+
+
+# --------------------------------------------------------------------------------------------------
+# Sweep di popolazione + statistiche appaiate
+# --------------------------------------------------------------------------------------------------
+
+def _secondi(frame):
+    """Frame simulati -> secondi equivalenti a velocita' normale (ogni frame vale ACCELERAZIONE frame)."""
+    return frame / 60 * ACCELERAZIONE
+
+
+def _statistiche_appaiate(coppie):
+    """coppie: lista di (tempo_prima, tempo_dopo). Ritorna media delle differenze, errore standard,
+    percentuale di miglioramento e quante volte l'AI ha vinto. La differenza per coppia e' la statistica
+    forte: elimina la variabilita' fra scenari, che e' la fonte di rumore dominante."""
+    differenze = [prima - dopo for prima, dopo in coppie]  # positivo = l'AI ci mette meno
+    n = len(differenze)
+    media = sum(differenze) / n
+    if n > 1:
+        varianza = sum((d - media) ** 2 for d in differenze) / (n - 1)
+        errore_standard = (varianza / n) ** 0.5
+    else:
+        errore_standard = float("nan")
+    media_prima = sum(p for p, _ in coppie) / n
+    percentuale = media / media_prima * 100 if media_prima > 0 else float("nan")
+    vittorie = sum(1 for d in differenze if d > 0)
+    return media, errore_standard, percentuale, vittorie
+
+
+def confronta(nome_mappa=MAPPA_DEFAULT, repliche=REPLICHE, livelli=None):
+    livelli = livelli or list(range(POPOLAZIONE_MIN, POPOLAZIONE_MAX + 1, POPOLAZIONE_PASSO))
+    geometria = _geometria_salvata()
+
+    compiti = []
+    for totale in livelli:
+        popolazione = popolazione_da_totale(totale)
+        popolazione.update(geometria)
+        for i in range(repliche):
+            # crc32 e non hash(): hash() sulle stringhe e' randomizzato ad ogni avvio di Python, il
+            # seed nominale non sarebbe riproducibile fra un run e l'altro
+            seed = zlib.crc32(f"{nome_mappa}|{totale}|{i}".encode())
+            compiti.append((nome_mappa, popolazione, totale, seed))
+    # i livelli densi costano molto piu' calcolo: mescolati si spargono fra i worker invece di
+    # accumularsi tutti in coda, dove lascerebbero i worker scarichi ad aspettarne uno solo
+    random.shuffle(compiti)
+
+    n_worker = min(8, os.cpu_count() or 4)
+    print(f"Validazione appaiata fattoriale su {nome_mappa}")
+    print(f"  livelli di popolazione: {livelli}")
+    print(f"  condizioni: {', '.join(CONDIZIONI)}")
+    print(f"  {len(compiti)} gruppi appaiati x {len(CONDIZIONI)} condizioni = {len(compiti) * len(CONDIZIONI)} corse")
+    print(f"  geometria da config: robot {geometria['raggio_robot']:.1f}px, persone {geometria['raggio_persona']:.1f}px, "
+          f"sicurezza {geometria['raggio_sicurezza']:.1f}px, lidar {geometria['raggio_lidar']:.0f}px")
+    print(f"  accelerazione {ACCELERAZIONE}x, {n_worker} processi\n")
+
+    risultati = {t: [] for t in livelli}   # totale -> lista di (seed, risultati per condizione)
+    inizio = time.time()
+    completate = 0
+    with mp.Pool(n_worker, initializer=_inizializza_worker) as pool:
+        for totale, seed, esito in pool.imap_unordered(_esegui_gruppo, compiti, chunksize=1):
+            completate += 1
+            risultati[totale].append((seed, esito))
+            if completate % max(1, len(compiti) // 20) == 0 or completate == len(compiti):
+                print(f"  [{completate}/{len(compiti)}] gruppi completati ({time.time() - inizio:.0f}s)")
+
+    print(f"\nCompletato in {time.time() - inizio:.1f}s\n")
+    _riporta(nome_mappa, livelli, risultati)
+
+
+def _riporta(nome_mappa, livelli, risultati):
+    """Ogni condizione confrontata con CONDIZIONE_RIFERIMENTO sugli stessi seed. I gruppi in cui anche una
+    sola condizione non e' arrivata vengono scartati interi: confrontare condizioni su insiemi di seed
+    diversi romperebbe l'appaiamento, che e' l'unica ragione per cui questo test e' sensibile."""
+    altre = [c for c in CONDIZIONI if c != CONDIZIONE_RIFERIMENTO]
+    print(f"=== Confronto appaiato contro '{CONDIZIONE_RIFERIMENTO}': stessa folla, stesso percorso, robot diverso ===")
+    print("(differenza positiva = arriva prima della base; 'vinti' = gruppi in cui ha fatto meglio)\n")
+    intestazione = (f"{'persone':>8}{'condizione':>15}{'t_base':>9}{'t_cond':>9}{'diff':>9}{'err.std':>9}"
+                    f"{'miglior.':>10}{'vinti':>9}{'fermo_base':>12}{'fermo_cond':>12}")
+    print(intestazione)
+    print("-" * len(intestazione))
+
+    righe, righe_gruppi = [], []
+    differenze_globali = {c: [] for c in altre}
+    for totale in livelli:
+        gruppi_validi = []
+        scartati = 0
+        for seed, esito in risultati[totale]:
+            if not all(esito[c][0] for c in CONDIZIONI):
+                scartati += 1
+                continue
+            gruppi_validi.append((seed, esito))
+        if not gruppi_validi:
+            print(f"{totale:>8}   nessun gruppo completo (in almeno una condizione il robot non e' arrivato)")
+            continue
+
+        for seed, esito in gruppi_validi:
+            riga = {"mappa": nome_mappa, "popolazione": totale, "seed": seed}
+            for c in CONDIZIONI:
+                riga[f"tempo_{c}_s"] = round(_secondi(esito[c][1]), 2)
+                riga[f"fermo_{c}_s"] = round(_secondi(esito[c][2]), 2)
+            righe_gruppi.append(riga)
+
+        base_tempi = [_secondi(e[CONDIZIONE_RIFERIMENTO][1]) for _, e in gruppi_validi]
+        base_fermi = [_secondi(e[CONDIZIONE_RIFERIMENTO][2]) for _, e in gruppi_validi]
+        media_base = sum(base_tempi) / len(base_tempi)
+        media_fermo_base = sum(base_fermi) / len(base_fermi)
+
+        for c in altre:
+            tempi_c = [_secondi(e[c][1]) for _, e in gruppi_validi]
+            fermi_c = [_secondi(e[c][2]) for _, e in gruppi_validi]
+            coppie = list(zip(base_tempi, tempi_c))
+            media_diff, err_std, percentuale, vittorie = _statistiche_appaiate(coppie)
+            differenze_globali[c].extend(b - x for b, x in coppie)
+            media_c = sum(tempi_c) / len(tempi_c)
+            media_fermo_c = sum(fermi_c) / len(fermi_c)
+            print(f"{totale:>8}{c:>15}{media_base:>9.2f}{media_c:>9.2f}{media_diff:>+9.2f}{err_std:>9.2f}"
+                  f"{percentuale:>+9.1f}%{vittorie:>5}/{len(coppie):<3}{media_fermo_base:>12.2f}{media_fermo_c:>12.2f}")
+            righe.append({"mappa": nome_mappa, "popolazione": totale, "condizione": c,
+                          "gruppi": len(coppie), "tempo_base_s": round(media_base, 2),
+                          "tempo_condizione_s": round(media_c, 2),
+                          "differenza_media_s": round(media_diff, 2),
+                          "errore_standard_s": round(err_std, 2),
+                          "miglioramento_percento": round(percentuale, 1),
+                          "gruppi_vinti": vittorie,
+                          "fermo_base_s": round(media_fermo_base, 2),
+                          "fermo_condizione_s": round(media_fermo_c, 2),
+                          "gruppi_scartati": scartati})
+        print()
+
+    if righe:
+        _salva_csv(FILE_RISULTATI_CSV, righe)
+        _salva_csv(FILE_COPPIE_CSV, righe_gruppi)
+        print(f"Tabella per livello/condizione: {FILE_RISULTATI_CSV}")
+        print(f"Singoli gruppi appaiati:        {FILE_COPPIE_CSV}")
+
+        print(f"\n=== Sintesi su tutti i livelli (contro '{CONDIZIONE_RIFERIMENTO}') ===")
+        print(f"{'condizione':>15}{'diff.media':>12}{'err.std':>10}{'rapporto':>10}{'vinti':>10}")
+        migliore, migliore_diff = None, -float("inf")
+        for c in altre:
+            d = differenze_globali[c]
+            n = len(d)
+            media = sum(d) / n
+            dev = (sum((x - media) ** 2 for x in d) / (n - 1)) ** 0.5 if n > 1 else float("nan")
+            err = dev / n ** 0.5 if n > 1 else float("nan")
+            # rapporto fra differenza media e suo errore standard: sopra ~2 la differenza e' solida
+            # rispetto al rumore, sotto ~1 e' indistinguibile da zero anche se la media non e' nulla
+            rapporto = abs(media / err) if err and err == err and err > 0 else float("nan")
+            vinti = sum(1 for x in d if x > 0)
+            print(f"{c:>15}{media:>+12.2f}{err:>10.2f}{rapporto:>10.1f}{vinti:>5}/{n:<4}")
+            if media > migliore_diff:
+                migliore, migliore_diff = c, media
+        print(f"\nCondizione migliore: '{migliore}' ({migliore_diff:+.2f}s rispetto alla base)")
+
+
+def _geometria_salvata():
+    """Raggi dalla configurazione salvata dal pannello di main.py, cosi' la validazione misura lo stesso
+    robot che viene realmente usato nel simulatore invece dei valori di default. Contano perche' decidono
+    quanto spazio di manovra ha il robot: raggi piu' piccoli lasciano passaggi praticabili dove prima
+    c'era un tappo, e quindi danno all'A* piu' rotte alternative fra cui la mappa di costo puo'
+    effettivamente far pendere la scelta.
+
+    NB: non toccano la dinamica interna della folla (la repulsione fra persone usa
+    RANGE_EVITAMENTO_PERSONE, costante a se'), quindi il modello allenato resta valido: cambia solo
+    l'ingombro del robot e il raggio entro cui spinge via le persone."""
+    import json
+    valori = {}
+    if os.path.exists(FILE_CONFIGURAZIONE_PANNELLO):
+        with open(FILE_CONFIGURAZIONE_PANNELLO, "r") as f:
+            valori = json.load(f)
+    return {
+        "raggio_sicurezza": valori.get("raggio_sicurezza", sim.RAGGIO_SICUREZZA_DEFAULT),
+        "raggio_robot": valori.get("raggio_robot", sim.RAGGIO_ROBOT_DEFAULT),
+        "raggio_persona": valori.get("raggio_persona", sim.RAGGIO_PERSONA_DEFAULT),
+        "raggio_lidar": valori.get("raggio_lidar", sim.RAGGIO_LIDAR_DEFAULT),
+    }
+
+
+def _salva_csv(path, righe):
+    os.makedirs(CARTELLA_RISULTATI, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        scrittore = csv.DictWriter(f, fieldnames=list(righe[0].keys()))
+        scrittore.writeheader()
+        scrittore.writerows(righe)
+
+
+def _stima_risparmio(percentuale_risparmio):
+    """Conversione tempo->soldi, solo ordine di grandezza: i due valori qui sotto sono segnaposto da
+    sostituire con stime prese da progetti di robot di servizio reali. Non include i costi di
+    implementazione dell'AI (sviluppo, dati, inferenza): e' il solo lato del beneficio."""
+    COSTO_ORARIO_EUR = 15.0
+    ORE_AL_GIORNO = 8.0
+    ore_risparmiate = ORE_AL_GIORNO * (percentuale_risparmio / 100)
+    al_giorno = ore_risparmiate * COSTO_ORARIO_EUR
+    print(f"\n=== Stima di massima (solo beneficio, NON i costi di implementazione dell'AI) ===")
+    print(f"Con {COSTO_ORARIO_EUR:.0f} EUR/h e {ORE_AL_GIORNO:.0f}h/giorno di operativita':")
+    print(f"  ~{ore_risparmiate:.2f}h/giorno risparmiate -> ~{al_giorno:.1f} EUR/giorno, "
+          f"~{al_giorno * 260:.0f} EUR/anno (260 giorni lavorativi)")
+    print("(sostituisci COSTO_ORARIO_EUR e ORE_AL_GIORNO con stime da progetti reali)")
+
+
+if __name__ == "__main__":
+    argomenti = [a for a in sys.argv[1:] if not a.startswith("--")]
+    mappa = argomenti[0] if argomenti else MAPPA_DEFAULT
+    if "--diagnostica" in sys.argv:
+        # pochi livelli rappresentativi: serve a capire quale componente paga, non a tracciare la curva
+        confronta(mappa, livelli=LIVELLI_DIAGNOSTICI)
+    else:
+        confronta(mappa)

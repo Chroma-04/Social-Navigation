@@ -24,6 +24,7 @@ Uso:
 import os
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # la radice del progetto: main.py e training_scenari.py stanno li'
 import math
 import random
 import time
@@ -35,21 +36,89 @@ import main as sim
 import training_scenari as ts
 
 # --- parametri del dataset ---
-FINESTRA_STORICO_FRAME = 30        # 0.5s di storico (posizione+velocita' filtrate dal Kalman) dato in input al modello - deve restare identica alla costante omonima in allena_previsione.py
-ORIZZONTE_PREVISIONE_FRAME = sim.PREVISIONE_BLOB_FRAME  # 1s nel futuro: stesso orizzonte usato dal vivo per la macchia di probabilita'
-INTERVALLO_CAMPIONAMENTO_FRAME = 5  # non registra una previsione ad ogni singolo frame per persona: frame consecutivi sono quasi identici
+# ACCELERAZIONE: deve restare identica a testing.ACCELERAZIONE. Un frame vale N frame "normali" (robot e
+# persone percorrono N volte la distanza, gli orizzonti espressi in frame si dividono per N), quindi lo
+# stesso scenario costa N volte meno calcolo. Il modello impara la dinamica a QUESTO passo temporale:
+# usarlo in inferenza a un passo diverso lo manda fuori distribuzione (prepara_input gli passa posizioni
+# relative e velocita' grezze, che scalano entrambe con l'accelerazione), per questo dataset, training e
+# testing devono condividere lo stesso valore.
+ACCELERAZIONE = 5
+FINESTRA_STORICO_FRAME = 30        # storico (posizione+velocita' filtrate dal Kalman) dato in input al modello - deve restare identica alla costante omonima in allena_previsione.py. NON si divide per l'accelerazione: e' la forma dell'input della rete, non un orizzonte temporale
+ORIZZONTE_PREVISIONE_FRAME = max(1, sim.PREVISIONE_BLOB_FRAME // ACCELERAZIONE)  # stesso orizzonte usato dal vivo per la macchia di probabilita', riscalato dall'accelerazione
+INTERVALLO_CAMPIONAMENTO_FRAME = max(1, 5 // ACCELERAZIONE)  # non registra una previsione ad ogni singolo frame per persona: frame consecutivi sono quasi identici (a passo accelerato lo sono meno, quindi si campiona piu' spesso)
 
-FRAME_PER_SCENARIO = {"rapido": 900, "completo": 3600}  # 15s / 60s di simulazione per combinazione
+FRAME_PER_SCENARIO = {"rapido": max(1, 900 // ACCELERAZIONE), "completo": max(1, 3600 // ACCELERAZIONE)}  # 15s / 60s equivalenti di simulazione per combinazione
 COMBINAZIONI_RAPIDO = {"mappe": ["aperta", "corridoio", "porta_stretta"], "densita": ["rado", "medio"], "mix": ["misto"]}
 
+# --- MODALITA' SPECIALIZZATA: sweep di densita' su un solo ambiente ---
+# I preset rado/medio/denso di training_scenari (7/22/40 individui sulla mappa di riferimento) coprivano il
+# caso generico, ma il robot viene poi provato con centinaia di persone in scena. A 40 individui la gente
+# cammina quasi dritta e il Kalman da solo basta gia': e' ad alta densita' che le persone si deviano di
+# continuo a vicenda e nascono i residui non lineari che il modello deve imparare a correggere. Qui si
+# spazza l'intero intervallo fino a POPOLAZIONE_MAX, cosi' il modello vede sia le densita' basse sia
+# quelle a cui viene poi testato, invece di essere allenato lontano dal punto di lavoro.
+POPOLAZIONE_MIN = 50   # sotto questa soglia non c'e' quasi nessuno da tracciare: scenari che non producono campioni utili (a 0 persone, letteralmente zero)
+POPOLAZIONE_MAX = 550  # copre la configurazione di esercizio (565 individui: 120/100/170/50) senza spingersi oltre, dove il costo di calcolo cresce molto e il beneficio dell'AI tende comunque a saturare
+POPOLAZIONE_PASSO = 50
+# Proporzioni della folla: persone normali / corridori / ferme / membri di gruppo. I gruppi non entrano in
+# 'budget_individui' (sono entita' composte, contate a parte), quindi la loro quota si ottiene tarando
+# numero_gruppi_base - vedi _densita_per_popolazione.
+#
+# Ricavate dalla configurazione reale in cui viene usato il simulatore (pannello tecnico: 120 persone,
+# 100 corridori, 170 ferme, 50 gruppi): i 50 gruppi portano ~175 membri, quindi il totale e' 565 e i
+# membri di gruppo sono quasi un terzo della folla, non un quinto. Allenare su proporzioni diverse da
+# quelle di esercizio sarebbe uno svantaggio gratuito, visto che proprio i membri di gruppo (che
+# rincorrono il capofila accelerando fino a GRUPPO_FATTORE_RINCORSA_MAX) sono i casi su cui il Kalman
+# sbaglia di piu' e su cui la correzione AI ha piu' da guadagnare.
+QUOTA_NORMALI, QUOTA_CORRIDORI, QUOTA_FERME, QUOTA_GRUPPI = 0.212, 0.177, 0.301, 0.310
+MIX_SPECIALIZZATO = {
+    "prop_normali": QUOTA_NORMALI, "prop_corridori": QUOTA_CORRIDORI, "prop_ferme": QUOTA_FERME,
+    "moltiplicatore_gruppi": 1.0,
+}
+
+
+def popolazione_da_totale(totale):
+    """Conteggi assoluti (persone/corridori/ferme/gruppi) per una folla di 'totale' individui con le quote
+    QUOTA_*. E' la stessa ricetta usata per generare il dataset, riesposta in forma di conteggi diretti
+    cosi' che testing.py possa costruire la stessa folla ad ogni livello di densita' dello sweep: training
+    e valutazione restano sulla stessa distribuzione, invece di allenare su una composizione e misurare
+    su un'altra."""
+    return {
+        "numero_persone": max(0, round(totale * QUOTA_NORMALI)),
+        "numero_corridori": max(0, round(totale * QUOTA_CORRIDORI)),
+        "numero_persone_ferme": max(0, round(totale * QUOTA_FERME)),
+        "numero_gruppi": max(0, round(totale * QUOTA_GRUPPI / MEMBRI_MEDI_PER_GRUPPO)),
+    }
+MEMBRI_MEDI_PER_GRUPPO = sim.GRUPPO_MEMBRI_MEDIA
+
+
+def _fattore_area(nome_mappa):
+    """Rapporto fra l'area libera della mappa e CELLE_LIBERE_RIFERIMENTO: e' lo stesso fattore con cui
+    costruisci_scenario scala i budget, quindi va invertito qui per centrare una popolazione ASSOLUTA."""
+    griglia = [[sim.Nodo(r, c) for c in range(sim.X_TOT)] for r in range(sim.Y_TOT)]
+    sim.crea_bordi(griglia)
+    costruttore = ts.MAPPE.get(nome_mappa) or ts.MAPPE_TEST.get(nome_mappa)
+    costruttore(griglia)
+    celle_libere = sum(1 for riga in griglia for n in riga if n.tipo == "libero")
+    return celle_libere / ts.CELLE_LIBERE_RIFERIMENTO
+
+
+def _densita_per_popolazione(popolazione_totale, fattore_area):
+    """Dizionario di densita' che produce circa 'popolazione_totale' individui sulla mappa data, con le
+    quote di QUOTA_*. costruisci_scenario moltiplica per fattore_area, quindi qui si divide."""
+    budget_individui = popolazione_totale * (QUOTA_NORMALI + QUOTA_CORRIDORI + QUOTA_FERME) / fattore_area
+    gruppi = popolazione_totale * QUOTA_GRUPPI / MEMBRI_MEDI_PER_GRUPPO / fattore_area
+    return {"budget_individui": round(budget_individui), "numero_gruppi_base": round(gruppi)}
+
 CARTELLA_DATASET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset")
+_FRAME_REAZIONE_ORIGINALE = sim.FRAME_REAZIONE_VELOCITA_ROBOT  # valore di main.py prima della riscalatura per accelerazione: si riparte sempre da qui invece di dividere ripetutamente lo stesso modulo
 
 
 def _nuovo_target(griglia):
     return sim.cella_libera_casuale(griglia)
 
 
-def _aggiorna_robot(stato, griglia, tracciamento_lidar):
+def _aggiorna_robot(stato, griglia, tracciamento_lidar, moltiplicatore_velocita=ACCELERAZIONE):
     """Il robot gira fra punti casuali della mappa: qui il PERCORSO non e' soggetto di studio (serve solo
     a dare al lidar molte posizioni/angolazioni diverse da cui osservare le persone), quindi resta A*
     diretto senza costo di probabilita'/AI. La VELOCITA' pero' replica il controllo predittivo di main.py
@@ -61,7 +130,7 @@ def _aggiorna_robot(stato, griglia, tracciamento_lidar):
         nodo = _nuovo_target(griglia)
         stato["nodo_target"] = nodo
         stato["percorso"] = sim.algoritmo_a_star(griglia, (stato["x"], stato["y"]), (nodo.r, nodo.c))
-    velocita_nominale = sim.VELOCITA_ROBOT
+    velocita_nominale = sim.VELOCITA_ROBOT * moltiplicatore_velocita
     fattore = sim.fattore_velocita_da_conflitto(
         stato["x"], stato["y"], stato["percorso"], tracciamento_lidar, velocita_nominale,
         sim.RAGGIO_ROBOT_DEFAULT, sim.RAGGIO_PERSONA_DEFAULT)
@@ -224,13 +293,21 @@ def _risolvi_previsioni_mature(previsioni_in_sospeso, contatore_frame, entita_pe
         campioni["scenario"].append(etichetta_scenario)
 
 
-def esegui_scenario(nome_mappa, nome_densita, nome_mix, num_frame, seed):
+def esegui_scenario(nome_mappa, nome_densita, nome_mix, num_frame, seed, valore_densita=None, etichetta_extra="", valore_mix=None):
     """Fa girare un'unica combinazione mappa/densita/mix e restituisce i propri campioni (invece di
     scriverli su una struttura condivisa): cosi' la funzione e' autonoma e puo' girare in un processo
     separato del pool, senza bisogno di sincronizzazione fra scenari diversi (sono comunque indipendenti
-    l'uno dall'altro, nessun dato va condiviso durante il calcolo)."""
+    l'uno dall'altro, nessun dato va condiviso durante il calcolo).
+
+    'valore_densita' permette di passare un dizionario di densita' grezzo (vedi DENSITA_ALTE) tenendo
+    'nome_densita' come sola etichetta leggibile; se None, 'nome_densita' viene usato anche come chiave in
+    LIVELLI_DENSITA. 'etichetta_extra' distingue fra loro le ripetizioni della stessa combinazione, che
+    hanno seed diversi: l'etichetta di scenario e' l'unita' su cui allena_previsione.py divide train/test,
+    quindi ripetizioni diverse devono avere etichette diverse per non finire spezzate a meta'."""
     campioni = {"storico": [], "pred_kalman": [], "verita": [], "scenario": []}
-    scenario = ts.costruisci_scenario(nome_mappa, nome_densita, nome_mix, seed=seed)
+    densita_effettiva = nome_densita if valore_densita is None else valore_densita
+    mix_effettivo = nome_mix if valore_mix is None else valore_mix
+    scenario = ts.costruisci_scenario(nome_mappa, densita_effettiva, mix_effettivo, seed=seed)
     griglia = scenario["griglia"]
 
     membri_gruppi_mobili = [m for g in scenario["gruppi"] if g["mobile"] for m in g["membri"]]
@@ -238,13 +315,18 @@ def esegui_scenario(nome_mappa, nome_densita, nome_mix, num_frame, seed):
     tutte_mobili = scenario["persone"] + scenario["corridori"] + membri_gruppi_mobili
     tutte_le_persone = tutte_mobili + scenario["persone_ferme"] + membri_gruppi_fermi
     entita_per_pid = {id(p): p for p in tutte_le_persone}
+    # accelerazione: le persone coprono ACCELERAZIONE volte la distanza per frame (stesso meccanismo usato
+    # in testing.py, moltiplicando fattore_velocita invece di toccare _muovi_e_gestisci_stato)
+    for p in tutte_mobili:
+        p["fattore_velocita"] *= ACCELERAZIONE
+    sim.FRAME_REAZIONE_VELOCITA_ROBOT = max(1, _FRAME_REAZIONE_ORIGINALE // ACCELERAZIONE)
 
     nodo_iniziale_robot = sim.cella_libera_casuale(griglia)
     stato_robot = {"x": nodo_iniziale_robot.cx, "y": nodo_iniziale_robot.cy, "percorso": [], "nodo_target": nodo_iniziale_robot}
 
     tracciamento_lidar, storico_posizioni = {}, {}
     previsioni_in_sospeso = collections.deque()
-    etichetta_scenario = f"{nome_mappa}|{nome_densita}|{nome_mix}"
+    etichetta_scenario = f"{nome_mappa}|{nome_densita}|{nome_mix}{etichetta_extra}"
 
     range_evitamento_quad = sim.RANGE_EVITAMENTO_PERSONE ** 2
     range_evitamento_robot = sim.RAGGIO_ROBOT_DEFAULT + sim.RAGGIO_PERSONA_DEFAULT
@@ -280,19 +362,41 @@ def _esegui_scenario_pool(argomenti):
     return esegui_scenario(*argomenti)
 
 
-def genera_dataset(mappe, densita_livelli, mix_livelli, num_frame, file_output, n_worker=None):
+def genera_dataset(mappe, densita_livelli, mix_livelli, num_frame, file_output, n_worker=None, ripetizioni=1):
     """Dispaccia ogni combinazione mappa/densita/mix come un task indipendente su un pool di processi
     (ognuno gira su un core diverso della CPU): sono scenari completamente indipendenti fra loro, quindi
     si parallelizzano senza nessuna sincronizzazione, con uno speedup vicino al numero di core disponibili
-    invece di girare una combinazione alla volta in sequenza."""
+    invece di girare una combinazione alla volta in sequenza.
+
+    'ripetizioni' fa girare ogni combinazione piu' volte con seed diversi: le persone nascono in punti
+    diversi e scelgono destinazioni diverse, quindi ogni ripetizione produce traiettorie genuinamente
+    nuove pur sulla stessa mappa. E' il modo per accumulare tanti dati su POCHE mappe (allenamento
+    specializzato su un ambiente noto) invece di doverne aggiungere altre.
+
+    'densita_livelli' accetta sia nomi di LIVELLI_DENSITA sia chiavi di DENSITA_ALTE: le seconde vengono
+    passate a costruisci_scenario come dizionario grezzo, tenendo il nome come sola etichetta."""
     campioni = {"storico": [], "pred_kalman": [], "verita": [], "scenario": []}
+    # ogni voce di densita_livelli/mix_livelli e' o un nome (chiave di LIVELLI_DENSITA/MIX_COMPORTAMENTALE)
+    # o una coppia (etichetta, dizionario grezzo): la seconda forma serve alla modalita' specializzata, che
+    # usa densita' e proporzioni su misura senza aggiungerle alle tabelle condivise
+    def _scomponi(voce):
+        return voce if isinstance(voce, tuple) else (voce, None)
+
     combinazioni = [(m, d, x) for m in mappe for d in densita_livelli for x in mix_livelli]
     # zlib.crc32 invece di hash(): hash() su stringhe e' randomizzato ad ogni avvio di Python (PYTHONHASHSEED),
     # darebbe scenari diversi ad ogni run pur passando lo stesso seed nominale - crc32 e' deterministico
-    argomenti = [(m, d, x, num_frame, zlib.crc32(f"{m}|{d}|{x}".encode())) for m, d, x in combinazioni]
+    argomenti = []
+    for m, d, x in combinazioni:
+        nome_d, valore_d = _scomponi(d)
+        nome_x, valore_x = _scomponi(x)
+        for i in range(ripetizioni):
+            etichetta_extra = f"|r{i}" if ripetizioni > 1 else ""
+            argomenti.append((m, nome_d, nome_x, num_frame,
+                              zlib.crc32(f"{m}|{nome_d}|{nome_x}|{i}".encode()), valore_d, etichetta_extra, valore_x))
 
     n_worker = n_worker or min(8, os.cpu_count() or 4)
-    print(f"Uso {n_worker} processi in parallelo su {len(combinazioni)} combinazioni.\n")
+    print(f"Uso {n_worker} processi in parallelo su {len(argomenti)} scenari "
+          f"({len(combinazioni)} combinazioni x {ripetizioni} ripetizioni).\n")
 
     inizio = time.time()
     completati = 0
@@ -301,7 +405,7 @@ def genera_dataset(mappe, densita_livelli, mix_livelli, num_frame, file_output, 
             completati += 1
             for chiave in campioni:
                 campioni[chiave].extend(campioni_scenario[chiave])
-            print(f"[{completati}/{len(combinazioni)}] {nome_mappa}/{nome_densita}/{nome_mix}: {n_persone} persone, "
+            print(f"[{completati}/{len(argomenti)}] {nome_mappa}/{nome_densita}/{nome_mix}: {n_persone} persone, "
                   f"{num_frame} frame -> {len(campioni['verita'])} campioni totali finora "
                   f"({time.time() - inizio:.0f}s trascorsi)")
 
@@ -330,8 +434,31 @@ def genera_dataset(mappe, densita_livelli, mix_livelli, num_frame, file_output, 
     print(f"Dataset salvato in: {path_output}")
 
 
+MAPPA_SPECIALIZZATO = "training_mappa_01"  # ambiente di deployment noto su cui specializzare il modello
+RIPETIZIONI_SPECIALIZZATO = 10  # scenari indipendenti per ogni livello di popolazione: senza seed condiviso, ognuno genera persone e destinazioni diverse
+
+
 if __name__ == "__main__":
     modalita_completa = "--completo" in sys.argv
+    if "--specializzato" in sys.argv:
+        # Allenamento specializzato su un singolo ambiente noto, spazzando l'intero intervallo di
+        # popolazione a cui il robot verra' poi provato: niente varieta' di mappe (scelta consapevole -
+        # il modello che ne esce vale per QUELL'ambiente, non e' una prova di generalizzazione ma una
+        # specializzazione sul luogo di installazione), tanti scenari ripetuti con seed diversi al posto suo.
+        fattore = _fattore_area(MAPPA_SPECIALIZZATO)
+        popolazioni = list(range(POPOLAZIONE_MIN, POPOLAZIONE_MAX + 1, POPOLAZIONE_PASSO))
+        densita_livelli = [(f"pop{p}", _densita_per_popolazione(p, fattore)) for p in popolazioni]
+        mix_livelli = [("specializzato", MIX_SPECIALIZZATO)]
+        num_frame = FRAME_PER_SCENARIO["completo"]
+        file_output = f"dataset_previsione_specializzato_{ACCELERAZIONE}x.npz"
+        print(f"Modalita' specializzata su {MAPPA_SPECIALIZZATO} (area libera {fattore:.2f}x il riferimento)")
+        print(f"Popolazione da {POPOLAZIONE_MIN} a {POPOLAZIONE_MAX} a passi di {POPOLAZIONE_PASSO} "
+              f"({len(popolazioni)} livelli) x {RIPETIZIONI_SPECIALIZZATO} ripetizioni, accelerazione {ACCELERAZIONE}x")
+        print(f"Quote folla: {QUOTA_NORMALI:.0%} normali / {QUOTA_CORRIDORI:.0%} corridori / "
+              f"{QUOTA_FERME:.0%} ferme / {QUOTA_GRUPPI:.0%} gruppi\n")
+        genera_dataset([MAPPA_SPECIALIZZATO], densita_livelli, mix_livelli, num_frame, file_output,
+                       ripetizioni=RIPETIZIONI_SPECIALIZZATO)
+        sys.exit(0)
     if modalita_completa:
         mappe = list(ts.MAPPE.keys())
         densita_livelli = list(ts.LIVELLI_DENSITA.keys())

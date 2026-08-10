@@ -44,7 +44,7 @@ FILE_MAPPA_SLOT = [
 ]
 PASSWORD_SALVATAGGIO = "1258"
 FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
-VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 3.0
+VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 25.0
 NUMERO_PERSONE_DEFAULT = 0
 NUMERO_PERSONE_MAX = 200
 NUMERO_PERSONE_FERME_DEFAULT = 0
@@ -68,7 +68,7 @@ GRUPPO_DISTANZA_MAX_DIVERGENZA_PX = int(DIM_NODO * 5)  # oltre questa distanza d
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 MARGINE_PAN = 100  # spazio bianco massimo attorno alla mappa, in pixel
 RAGGIO_SICUREZZA_MIN, RAGGIO_SICUREZZA_MAX = 0, DIM_NODO * 6
-RAGGIO_SICUREZZA_DEFAULT = 14
+RAGGIO_SICUREZZA_DEFAULT = 12
 ALPHA_ZONA_SICUREZZA = 70  # trasparenza del cerchio (0-255)
 RAGGIO_ROBOT_MIN, RAGGIO_ROBOT_MAX = 5, int(DIM_NODO * 1.5)
 RAGGIO_ROBOT_DEFAULT = 7  # raggio "fisico" del robot (lo stesso con cui viene disegnato di default)
@@ -793,7 +793,7 @@ def main():
     # torch/CUDA ad ogni avvio del pool, che allungava l'avvio della simulazione di decine di secondi
     import numpy as np
     import torch
-    from allena_previsione import CorrezioneKalman, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO
+    from ai_predittiva.allena_previsione import CorrezioneKalman, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO
     # i forward pass della correzione AI sono minuscoli (batch di poche decine di persone, GRU a 32
     # unita'): il multithreading intra-op di default di torch (quanti core ha la CPU) spende piu' tempo
     # a sincronizzare i thread che a calcolare, e quella sincronizzazione compete col loop di pygame per
@@ -813,6 +813,7 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 32)
     font_piccolo = pygame.font.SysFont(None, 24)
+    font_grande = pygame.font.SysFont(None, 48)
 
     chiedendo_password = False
     input_password = ""
@@ -825,6 +826,9 @@ def main():
     primo_punto_rettangolo = None
     messaggio_mappa_training_timer = 0
     messaggio_mappa_training_testo = ""
+    frame_inizio_target = None  # frame in cui e' stato assegnato il target attuale (click): serve a calcolare il tempo di percorrenza all'arrivo
+    messaggio_arrivo_timer = 0
+    messaggio_arrivo_testo = ""
     
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
@@ -898,7 +902,12 @@ def main():
     sicurezza_attiva = True
     lidar_attivo = True
     ellissoidi_attivi = True
-    ai_attiva = True  # correzione AI sopra al Kalman (solo se modello_ai_disponibile): il toggle nasconde/riattiva solo la correzione, il Kalman classico resta sempre attivo sotto
+    # AI di predizione (correzione neurale del residuo del Kalman): DISATTIVATA di default. Il toggle
+    # riguarda solo la correzione - il Kalman classico resta sempre attivo sotto. Spenta perche' le misure
+    # mostrano che migliora la previsione (-9.2% di errore nel ciclo reale) ma non il tempo di percorrenza:
+    # il guadagno viene assorbito dalla macchia di probabilita', larga 90px contro ~38px di incertezza
+    # effettiva. Le quattro cause misurate sono documentate in ai_predittiva/__init__.py
+    ai_attiva = False
     controllo_velocita_attivo = True  # rallenta il robot in base al rischio davanti sul suo percorso (Livello 3 euristico)
     configurazione_salvataggio_timer = 0  # breve conferma visiva dopo il click su uno dei pulsanti in fondo al pannello
     configurazione_messaggio = ("", VERDE)
@@ -1138,6 +1147,7 @@ def main():
                     if 0 <= r < Y_TOT and 0 <= c < X_TOT:
                         target_pos = (r, c)
                         percorso = []  # forza ricalcolo immediato verso il nuovo target
+                        frame_inizio_target = contatore_frame
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 3: trascinando = False
@@ -1552,6 +1562,15 @@ def main():
             if passo_muro:
                 percorso = []  # il passo tagliava un muro: ricalcola subito invece di aspettare il prossimo intervallo
             if arrivato:
+                if frame_inizio_target is not None:
+                    # a velocita' di simulazione x10 il robot copre 10x la distanza per frame, quindi in
+                    # frame "grezzi" ci mette 1/10 del tempo: si moltiplica per il fattore di velocita'
+                    # corrente per mostrare il tempo equivalente a velocita' normale (1x), non il tempo
+                    # grezzo di frame che sottostima quanto ci metterebbe davvero un robot reale
+                    tempo_impiegato_s = (contatore_frame - frame_inizio_target) / 60 * moltiplicatore_velocita
+                    messaggio_arrivo_testo = f"Obiettivo raggiunto in {tempo_impiegato_s:.1f}s"
+                    messaggio_arrivo_timer = 180  # 3 secondi a 60 FPS
+                    frame_inizio_target = None
                 target_pos = None
 
         # 3b. Movimento persone, corridori e membri dei gruppi (stessa logica per tutti, cambia solo la velocita')
@@ -1820,6 +1839,11 @@ def main():
             msg_txt = font.render(messaggio_mappa_training_testo, True, VERDE)
             screen.blit(msg_txt, (10, 40))
 
+        if messaggio_arrivo_timer > 0:
+            messaggio_arrivo_timer -= 1
+            arrivo_txt = font_grande.render(messaggio_arrivo_testo, True, VERDE)
+            screen.blit(arrivo_txt, arrivo_txt.get_rect(center=(screen.get_width() // 2, screen.get_height() // 2)))
+
         # 5. Overlay richiesta password (salvataggio F5)
         if errore_timer > 0:
             errore_timer -= 1
@@ -1962,7 +1986,7 @@ def main():
             handle_definizione_x = slider_definizione_rect.x + int(rel_definizione * slider_definizione_rect.width)
             pygame.draw.circle(screen, COLORE_BLOB_PROBABILITA, (handle_definizione_x, slider_definizione_rect.centery), 9)
 
-            ai_label = "Correzione AI (previsione)" if modello_ai_disponibile else "Correzione AI - modello non trovato"
+            ai_label = "AI di predizione" if modello_ai_disponibile else "AI di predizione - modello non trovato"
             ai_txt = font.render(ai_label, True, NERO if modello_ai_disponibile else GRIGIO)
             screen.blit(ai_txt, (panel_rect.x + 15, panel_rect.y + 610))
             pygame.draw.rect(screen, VERDE if (ai_attiva and modello_ai_disponibile) else BIANCO, checkbox_ai_rect)
@@ -1995,6 +2019,10 @@ def main():
                 testo_messaggio, colore_messaggio = configurazione_messaggio
                 conferma_txt = font_piccolo.render(testo_messaggio, True, colore_messaggio)
                 screen.blit(conferma_txt, (panel_rect.x + 15, panel_rect.y + 692))
+
+        totale_persone_simulazione = len(persone) + len(corridori) + len(persone_ferme) + sum(len(g["membri"]) for g in gruppi)
+        contatore_persone_txt = font.render(f"Persone in simulazione: {totale_persone_simulazione}", True, NERO)
+        screen.blit(contatore_persone_txt, contatore_persone_txt.get_rect(bottomright=(screen.get_width() - 10, screen.get_height() - 10)))
 
         pygame.display.flip()
         clock.tick(60)
