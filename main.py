@@ -31,6 +31,17 @@ RAGGIO_PERCORSO_BREVE = DIM_NODO * 6  # distanza massima (in pixel) per un "perc
 RANGE_EVITAMENTO_PERSONE = 15  # px: sotto questa distanza da un'altra persona scatta una spinta di repulsione
 FORZA_REPULSIONE_PERSONE = 1.3  # px/frame massimi di spinta continua fra persone/corridori/leader (a distanza 0)
 COSTO_CELLA_OCCUPATA = DIM_NODO * 10  # penalita' di costo A* per una cella occupata da un'altra entita': forte ma non un divieto assoluto (evita percorsi vuoti nei passaggi a 1 cella)
+# Le persone ferme vanno tenute a distanza dal PIANIFICATORE, non dall'arresto di sicurezza. L'arresto e'
+# un meccanismo d'emergenza e presuppone che la situazione si sciolga da sola perche' la persona si
+# allontana: una persona ferma non si allontana mai, quindi farla rientrare nell'arresto blocca il robot
+# per sempre appena le entra accanto (provato). Poiche' pero' nella simulazione le persone non ostruiscono
+# fisicamente il moto (solo i muri lo fanno) e non vengono respinte dal robot se sono ferme, senza un
+# accorgimento il robot ci passerebbe letteralmente attraverso. Si marca quindi attorno a ogni persona
+# ferma RILEVATA un alone di celle a costo alto: il percorso la aggira a distanza invece di rasentarla, e
+# il problema non si presenta mai. Costo alto ma FINITO, come COSTO_CELLA_OCCUPATA: un varco tappato da una
+# persona ferma resta percorribile in ultima istanza invece di rendere il bersaglio irraggiungibile.
+COSTO_ALONE_PERSONE_FERME = COSTO_CELLA_OCCUPATA * 2
+MARGINE_ALONE_PERSONE_FERME_PX = 6.0  # px di franco oltre l'ingombro dei corpi / la zona di sicurezza
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot: 60 FPS / questo valore = volte al secondo
 INTERVALLO_AGGIORNAMENTO_MACCHIA_FRAME = 6  # ricalcolo macchia di probabilita': 60 FPS / questo valore = volte al secondo (10) - separato dal ricalcolo del percorso, cosi' l'ellisse resta aggiornata anche quando il percorso attuale e' ancora valido
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone: 60 FPS / questo valore = volte al secondo
@@ -126,6 +137,31 @@ ALPHA_MAX_BLOB = 140  # trasparenza massima (al centro della macchia) del render
 # macchia appare pressoche' un ellissoide continuo, indistinguibile a occhio dai quadretti.
 SOTTOCELLE_PER_LATO_MIN, SOTTOCELLE_PER_LATO_MAX = 1, 10
 SOTTOCELLE_PER_LATO_DEFAULT = 1
+# griglia di pianificazione del robot piu' fine di quella della folla (toggle "Griglia fine robot"). Le
+# persone continuano a pianificare su DIM_NODO: non ne hanno bisogno (camminano in coordinate continue e
+# il percorso serve solo come indicazione di massima) e sono loro il costo, non il robot - misurato: su
+# ~490 individui l'A* del robot e' l'1.7% del tempo di calcolo contro il 98.3% della folla, quindi
+# raffinare solo il robot costa circa il 12% in piu' invece di moltiplicare per 8 l'intera simulazione.
+# Due guadagni attesi, indipendenti fra loro:
+#   - VARCHI: ogni persona rilevata annerisce una cella intera in celle_bloccate. A 30px blocca 30px di
+#     corridoio pur essendo larga ~14: due persone vicine chiudono per il pianificatore un passaggio in
+#     cui il robot (raggio ~6px) passerebbe. A 15px il varco si riapre;
+#   - RISOLUZIONE DELLA MACCHIA: la correzione dell'AI di predizione sposta il centro previsto di ~28px,
+#     cioe' meno di una cella da 30px - a valle veniva quantizzata a zero. Su celle da 15px diventa
+#     esprimibile (vedi ai_predittiva/__init__.py, causa n.1 del risultato nullo).
+# FATTORE 2 (celle da 15px) e' scelto sulla geometria, non "il piu' fine possibile": una persona ha
+# diametro ~14px, quindi a 15px occupa circa una cella e celle_bloccate resta un modello onesto. Piu'
+# fine, una persona coprirebbe 2-4 celle e il blocco diventerebbe un pattern rumoroso da ricostruire.
+FATTORE_GRIGLIA_ROBOT = 2
+GRIGLIA_FINE_DEFAULT = True
+CELLE_SOTTOGRIGLIA_VISIBILI = 12  # entro quante celle dal robot si disegnano le suddivisioni della griglia fine
+# passo di campionamento dei controlli di visibilita' (lidar e scorciatoie Theta*), in PIXEL. Fissato
+# sulla griglia di movimento e non sul lato della cella su cui si sta lavorando: serve a non saltare un
+# muro sottile, e il muro piu' sottile possibile resta una cella da DIM_NODO anche sulla griglia fine del
+# robot (che eredita i muri suddividendoli). Campionare a dim/4 sulla griglia fine significherebbe 8
+# campioni per cella attraversata invece di 2, raddoppiando il costo del controllo - che il profiling
+# indica come il 96% del tempo di pianificazione - senza guadagnare nessuna garanzia in piu'.
+PASSO_CAMPIONAMENTO_VISIBILITA = DIM_NODO / 4
 FATTORE_VELOCITA_MEDIA = 1.0    # media della gaussiana (1.0 = velocita' base)
 FATTORE_VELOCITA_DEV_STD = 0.25  # deviazione standard: la maggior parte cammina, code = passeggiano/corrono
 FATTORE_VELOCITA_MIN, FATTORE_VELOCITA_MAX = 0.4, 2.5  # limiti per evitare fermi o assurdamente veloci
@@ -140,14 +176,22 @@ NERO = (30, 30, 30)
 GRIGIO_SCURO = (90, 90, 90)
 GRIGIO_PAVIMENTO = (195, 195, 195)  # sfondo della mappa
 GRIGIO_BORDO_CELLA = (182, 182, 182)  # bordo delle celle libere, un pochino piu' scuro dello sfondo
+GRIGIO_SOTTOGRIGLIA = (168, 176, 196)  # suddivisioni interne della griglia fine del robot: leggermente
+                                        # azzurrate per distinguerle dal bordo della cella di movimento,
+                                        # ma tenui, cosi' la griglia grossa resta quella che si legge
 COLORE_LIDAR = (235, 200, 0)
 
 class Nodo:
-    def __init__(self, r, c):
+    # dim_nodo e' memorizzato sul nodo (non letto dalla costante globale) perche' possono coesistere due
+    # griglie a risoluzione diversa: quella della folla a DIM_NODO e quella di pianificazione del robot,
+    # piu' fine. Tutte le funzioni che lavorano su una griglia ricavano da qui il lato della cella e le
+    # dimensioni, invece che dalle costanti di modulo, cosi' funzionano su entrambe senza saperlo.
+    def __init__(self, r, c, dim_nodo=DIM_NODO):
         self.r, self.c = r, c
-        self.x, self.y = c * DIM_NODO, r * DIM_NODO
-        self.cx = self.x + DIM_NODO // 2
-        self.cy = self.y + DIM_NODO // 2
+        self.dim = dim_nodo
+        self.x, self.y = c * dim_nodo, r * dim_nodo
+        self.cx = self.x + dim_nodo // 2
+        self.cy = self.y + dim_nodo // 2
         self.g = self.h = self.f = 0
         self.genitore = None
         self.tipo = "libero"
@@ -157,11 +201,19 @@ class Nodo:
         self.genitore = None
 
 def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None, celle_bloccate=None, mappa_costo_extra=None):
-    c_inizio = int(inizio_pos_pixel[0] // DIM_NODO)
-    r_inizio = int(inizio_pos_pixel[1] // DIM_NODO)
+    # geometria ricavata dalla griglia ricevuta, non dalle costanti globali: la stessa funzione serve sia
+    # la folla (griglia a DIM_NODO) sia il robot (griglia fine). COSTO_CELLA_OCCUPATA si riscala con il
+    # lato della cella perche' le distanze si accumulano in PIXEL mentre i costi si sommano PER CELLA
+    # attraversata: dimezzando la cella si attraversano il doppio di celle, quindi il costo di ciascuna
+    # va dimezzato perche' la penalita' complessiva di attraversare un ostacolo resti la stessa
+    dim = griglia[0][0].dim
+    righe, colonne = len(griglia), len(griglia[0])
+    costo_occupata = COSTO_CELLA_OCCUPATA * dim / DIM_NODO
+    c_inizio = int(inizio_pos_pixel[0] // dim)
+    r_inizio = int(inizio_pos_pixel[1] // dim)
     r_fine, c_fine = fine_pos_griglia
-    r_inizio = max(0, min(Y_TOT - 1, r_inizio))
-    c_inizio = max(0, min(X_TOT - 1, c_inizio))
+    r_inizio = max(0, min(righe - 1, r_inizio))
+    c_inizio = max(0, min(colonne - 1, c_inizio))
 
     nodo_inizio = griglia[r_inizio][c_inizio]
     nodo_fine = griglia[r_fine][c_fine]
@@ -196,7 +248,7 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
 
         for m in [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
             r, c = attuale.r + m[0], attuale.c + m[1]
-            if 0 <= r < Y_TOT and 0 <= c < X_TOT:
+            if 0 <= r < righe and 0 <= c < colonne:
                 vicino = griglia[r][c]
                 if vicino in closed_list or vicino.tipo == "muro": continue
                 if m[0] != 0 and m[1] != 0:
@@ -215,7 +267,7 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
                     # penalita' pesante, non un divieto assoluto: se esiste un'alternativa la preferisce,
                     # ma se quella cella occupata e' l'unico passaggio (es. una porta larga 1 cella) la
                     # attraversa comunque invece di restituire un percorso vuoto e restare bloccata per sempre
-                    dist += COSTO_CELLA_OCCUPATA
+                    dist += costo_occupata
                 if mappa_costo_extra:
                     # costo morbido e graduale (es. la macchia di probabilita' del lidar predittivo del
                     # robot): a differenza di celle_bloccate non e' un blocco secco, il peso varia da
@@ -247,6 +299,27 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
     for n in in_open:
         n.reset_calcoli()
     return []
+
+def crea_griglia_robot(griglia_base, fattore):
+    """Griglia di pianificazione del robot a risoluzione fattore volte piu' fine di quella della folla.
+
+    I muri sono gli stessi, semplicemente suddivisi: non si guadagna informazione sulla mappa (una cella
+    muro da 30px diventa 4 celle muro da 15px). Il guadagno e' tutto nella granularita' di cio' che ci si
+    appoggia sopra - celle occupate dalle persone, macchia di probabilita', isteresi - vedi il commento
+    su FATTORE_GRIGLIA_ROBOT. Con fattore 1 restituisce la griglia originale senza copiarla, cosi' il
+    toggle spento e' esattamente il comportamento di prima e non solo un caso equivalente."""
+    if fattore <= 1:
+        return griglia_base
+    dim = DIM_NODO // fattore
+    righe, colonne = len(griglia_base) * fattore, len(griglia_base[0]) * fattore
+    fine = [[Nodo(r, c, dim) for c in range(colonne)] for r in range(righe)]
+    for r in range(righe):
+        riga_base = griglia_base[r // fattore]
+        riga_fine = fine[r]
+        for c in range(colonne):
+            if riga_base[c // fattore].tipo == "muro":
+                riga_fine[c].tipo = "muro"
+    return fine
 
 def crea_bordi(griglia):
     for r in range(Y_TOT):
@@ -453,12 +526,14 @@ def linea_di_vista_libera(griglia, x1, y1, x2, y2):
     dist = math.hypot(x2 - x1, y2 - y1)
     if dist == 0:
         return True
-    passi = max(1, int(dist / (DIM_NODO / 4)))
+    dim = griglia[0][0].dim
+    righe, colonne = len(griglia), len(griglia[0])
+    passi = max(1, int(dist / PASSO_CAMPIONAMENTO_VISIBILITA))
     for i in range(passi + 1):
         t = i / passi
         x, y = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
-        r, c = int(y // DIM_NODO), int(x // DIM_NODO)
-        if 0 <= r < Y_TOT and 0 <= c < X_TOT and griglia[r][c].tipo == "muro":
+        r, c = int(y // dim), int(x // dim)
+        if 0 <= r < righe and 0 <= c < colonne and griglia[r][c].tipo == "muro":
             return False
     return True
 
@@ -471,12 +546,14 @@ def scorciatoia_libera(griglia, nodo_a, nodo_b, celle_bloccate, mappa_costo_extr
     dist = math.hypot(nodo_b.cx - nodo_a.cx, nodo_b.cy - nodo_a.cy)
     if dist == 0:
         return True
-    passi = max(1, int(dist / (DIM_NODO / 4)))
+    dim = griglia[0][0].dim
+    righe, colonne = len(griglia), len(griglia[0])
+    passi = max(1, int(dist / PASSO_CAMPIONAMENTO_VISIBILITA))
     for i in range(passi + 1):
         t = i / passi
         x, y = nodo_a.cx + (nodo_b.cx - nodo_a.cx) * t, nodo_a.cy + (nodo_b.cy - nodo_a.cy) * t
-        r, c = int(y // DIM_NODO), int(x // DIM_NODO)
-        if not (0 <= r < Y_TOT and 0 <= c < X_TOT) or griglia[r][c].tipo == "muro":
+        r, c = int(y // dim), int(x // dim)
+        if not (0 <= r < righe and 0 <= c < colonne) or griglia[r][c].tipo == "muro":
             return False
         if celle_bloccate and (r, c) in celle_bloccate:
             return False
@@ -646,8 +723,9 @@ def passo_movimento(x, y, percorso, velocita, nodo_target, griglia):
 
     if dist > velocita:
         nx, ny = x + (dx / dist) * velocita, y + (dy / dist) * velocita
-        r, c = int(ny // DIM_NODO), int(nx // DIM_NODO)
-        if not (0 <= r < Y_TOT and 0 <= c < X_TOT) or griglia[r][c].tipo == "muro":
+        dim = griglia[0][0].dim
+        r, c = int(ny // dim), int(nx // dim)
+        if not (0 <= r < len(griglia) and 0 <= c < len(griglia[0])) or griglia[r][c].tipo == "muro":
             return x, y, False, True
         return nx, ny, False, False
 
@@ -832,6 +910,13 @@ def main():
     
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
+    # griglia separata su cui pianifica SOLO il robot (vedi FATTORE_GRIGLIA_ROBOT). La folla continua a
+    # usare `griglia`. Va ricostruita quando cambia il toggle o quando si modificano i muri con l'editor.
+    griglia_fine_attiva = GRIGLIA_FINE_DEFAULT
+    fattore_robot = FATTORE_GRIGLIA_ROBOT if griglia_fine_attiva else 1
+    dim_robot = DIM_NODO // fattore_robot
+    griglia_robot = crea_griglia_robot(griglia, fattore_robot)
+    griglia_robot_da_ricostruire = False
 
     # modello di correzione AI sopra al Kalman (Livello 2): allenato offline da allena_previsione.py sul
     # dataset di genera_dataset_previsione.py, caricato qui solo per l'inferenza (nessun training dal
@@ -967,6 +1052,20 @@ def main():
                     pygame.draw.rect(screen, NERO, rect)
                 else:
                     pygame.draw.rect(screen, GRIGIO_BORDO_CELLA, rect, 1)
+                    # suddivisioni della griglia su cui pianifica il robot. Disegnate SOLO nell'intorno
+                    # del robot, non su tutta la viewport: a schermo pieno sono migliaia di linee per
+                    # frame (misurato: da sole bastano a far scendere il framerate) e comunque la
+                    # risoluzione fine interessa guardarla dove il robot sta manovrando. Si saltano anche
+                    # quando la cella a schermo e' troppo piccola perche' si leggano
+                    if (fattore_robot > 1 and (ex - sx) >= 16
+                            and abs(n.cx - robot_x) < CELLE_SOTTOGRIGLIA_VISIBILI * DIM_NODO
+                            and abs(n.cy - robot_y) < CELLE_SOTTOGRIGLIA_VISIBILI * DIM_NODO):
+                        for k in range(1, fattore_robot):
+                            q = k / fattore_robot
+                            xk = sx + int((ex - sx) * q)
+                            yk = sy + int((ey - sy) * q)
+                            pygame.draw.line(screen, GRIGIO_SOTTOGRIGLIA, (xk, sy), (xk, ey - 1))
+                            pygame.draw.line(screen, GRIGIO_SOTTOGRIGLIA, (sx, yk), (ex - 1, yk))
 
         # Layout pannello tecnico (ricalcolato ogni frame per seguire il resize)
         panel_w, panel_h = 370, 765
@@ -986,6 +1085,7 @@ def main():
         checkbox_ellissoidi_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 543, 20, 20)
         checkbox_ai_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 608, 20, 20)
         checkbox_velocita_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 645, 20, 20)
+        checkbox_griglia_fine_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 682, 20, 20)
         # pulsanti sempre in fondo al pannello, per avere l'ambiente di test preferito pronto ad ogni avvio
         larghezza_pulsante_config = (panel_w - 30 - 20) // 3
         button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 715, larghezza_pulsante_config, 35)
@@ -1080,6 +1180,8 @@ def main():
                         ai_attiva = not ai_attiva
                     elif checkbox_velocita_rect.collidepoint(event.pos):
                         controllo_velocita_attivo = not controllo_velocita_attivo
+                    elif checkbox_griglia_fine_rect.collidepoint(event.pos):
+                        griglia_fine_attiva = not griglia_fine_attiva  # la griglia viene rifatta a inizio frame
                     elif button_salva_config_rect.collidepoint(event.pos):
                         salva_configurazione_pannello({
                             "numero_persone": numero_persone, "numero_corridori": numero_corridori,
@@ -1091,6 +1193,7 @@ def main():
                             "sicurezza_attiva": sicurezza_attiva, "lidar_attivo": lidar_attivo,
                             "ellissoidi_attivi": ellissoidi_attivi, "ai_attiva": ai_attiva,
                             "controllo_velocita_attivo": controllo_velocita_attivo,
+                            "griglia_fine_attiva": griglia_fine_attiva,
                         }, FILE_CONFIGURAZIONE_PANNELLO)
                         configurazione_messaggio = ("Configurazione salvata", VERDE)
                         configurazione_salvataggio_timer = 90
@@ -1116,6 +1219,7 @@ def main():
                             ellissoidi_attivi = configurazione_da_caricare.get("ellissoidi_attivi", ellissoidi_attivi)
                             ai_attiva = configurazione_da_caricare.get("ai_attiva", ai_attiva)
                             controllo_velocita_attivo = configurazione_da_caricare.get("controllo_velocita_attivo", controllo_velocita_attivo)
+                            griglia_fine_attiva = configurazione_da_caricare.get("griglia_fine_attiva", griglia_fine_attiva)
                             configurazione_messaggio = ("Configurazione caricata", VERDE)
                         else:
                             configurazione_messaggio = ("Nessuna configurazione salvata", ROSSO)
@@ -1134,6 +1238,7 @@ def main():
                         raggio_lidar, raggio_persona = RAGGIO_LIDAR_DEFAULT, RAGGIO_PERSONA_DEFAULT
                         definizione_ellissoidi = SOTTOCELLE_PER_LATO_DEFAULT
                         sicurezza_attiva = lidar_attivo = ellissoidi_attivi = ai_attiva = controllo_velocita_attivo = True
+                        griglia_fine_attiva = GRIGLIA_FINE_DEFAULT
                         configurazione_messaggio = ("Configurazione ripristinata", VERDE)
                         configurazione_salvataggio_timer = 90
                 elif event.button == 4: zoom *= 1.1 # Zoom In
@@ -1376,6 +1481,17 @@ def main():
 
         zoom, offset_x, offset_y = limita_zoom_pan(zoom, offset_x, offset_y, screen.get_width(), screen.get_height())
 
+        # griglia di pianificazione del robot: si ricostruisce solo quando cambia il toggle o quando
+        # l'editor ha finito di modificare i muri, non ad ogni frame. Il percorso in corso viene buttato
+        # perche' i suoi nodi appartengono alla griglia vecchia
+        fattore_robot_voluto = FATTORE_GRIGLIA_ROBOT if griglia_fine_attiva else 1
+        if fattore_robot_voluto != fattore_robot or griglia_robot_da_ricostruire:
+            fattore_robot = fattore_robot_voluto
+            dim_robot = DIM_NODO // fattore_robot
+            griglia_robot = crea_griglia_robot(griglia, fattore_robot)
+            griglia_robot_da_ricostruire = False
+            percorso = []
+
         # 3. Movimento
         tempo_di_ricalcolare_robot = contatore_frame % INTERVALLO_RICALCOLO_ROBOT_FRAME == 0
         # NB: sicurezza_attiva / lidar_attivo / ellissoidi_attivi (pannello tecnico) nascondono SOLO il
@@ -1383,14 +1499,21 @@ def main():
         # rilevamento, costo di probabilita' nell'A*) resta sempre attivo, i toggle non lo influenzano
 
         membri_gruppi_mobili = [m for g in gruppi if g["mobile"] for m in g["membri"]]
+        membri_gruppi_fermi = [m for g in gruppi if not g["mobile"] for m in g["membri"]]
         tutte_mobili = persone + corridori + membri_gruppi_mobili  # persone, corridori e membri dei gruppi si muovono ed evitano gli altri tutti allo stesso modo
+        tutte_le_persone = tutte_mobili + persone_ferme + membri_gruppi_fermi
 
+        # Lo stop di sicurezza vale SOLO per i corpi mobili, ed e' deliberato: e' un meccanismo di
+        # emergenza, e presuppone che la situazione si sciolga da sola perche' la persona si allontana.
+        # Una persona ferma non si allontana mai, quindi includerla qui produce uno stallo permanente
+        # (provato: il robot che entra nella zona rossa di una persona ferma non riparte piu'). Le
+        # persone ferme si tengono a distanza a monte, nel pianificatore: vedi ALONE_PERSONE_FERME_PX.
         robot_bloccato = raggio_sicurezza > 0 and any(
             math.hypot(robot_x - p["x"], robot_y - p["y"]) < raggio_sicurezza for p in tutte_mobili
         )
 
         celle_persone_ferme = {(pf["r"], pf["c"]) for pf in persone_ferme}
-        celle_persone_ferme |= {(m["r"], m["c"]) for g in gruppi if not g["mobile"] for m in g["membri"]}
+        celle_persone_ferme |= {(m["r"], m["c"]) for m in membri_gruppi_fermi}
 
         # rilevamento "lidar" del robot: la planimetria (muri) la conosce gia' a priori, ma le persone
         # (in movimento o ferme) diventano ostacoli noti per il suo A* solo entro raggio_lidar. Il
@@ -1398,10 +1521,10 @@ def main():
         # da solo (ricampionato ogni frame) cambierebbe cella a ogni frame anche per una persona immobile,
         # forzando un ricalcolo continuo inutile. Il rumore si applica solo al costo passato all'A*, per
         # simulare l'incertezza sulla posizione percepita.
-        tutte_le_persone = tutte_mobili + persone_ferme + [m for g in gruppi if not g["mobile"] for m in g["membri"]]
         celle_rilevate = set()
         celle_rilevate_rumorose = set()
         id_rilevati_ora = set()
+        ferme_rilevate = []  # posizioni percepite delle sole persone ferme: attorno a queste si costruisce l'alone
         for p in tutte_le_persone:
             d = math.hypot(p["x"] - robot_x, p["y"] - robot_y)
             if raggio_lidar > 0 and d < raggio_lidar and linea_di_vista_libera(griglia, robot_x, robot_y, p["x"], p["y"]):
@@ -1410,9 +1533,19 @@ def main():
                 angolo_rumore = random.uniform(0, 2 * math.pi)
                 raggio_rumore = random.uniform(0, RUMORE_LIDAR_PX)
                 xr, yr = p["x"] + raggio_rumore * math.cos(angolo_rumore), p["y"] + raggio_rumore * math.sin(angolo_rumore)
-                r_rum = max(0, min(Y_TOT - 1, int(yr // DIM_NODO)))
-                c_rum = max(0, min(X_TOT - 1, int(xr // DIM_NODO)))
+                # celle bloccate espresse nella griglia del ROBOT (piu' fine di quella della folla quando
+                # il toggle e' attivo): e' qui che nasce il guadagno sui varchi, perche' una persona
+                # occupa una cella da 15px invece di annerirne una da 30. celle_rilevate sopra resta
+                # invece sulla griglia grossa: serve solo a capire se l'insieme dei rilevati e' cambiato
+                r_rum = max(0, min(Y_TOT * fattore_robot - 1, int(yr // dim_robot)))
+                c_rum = max(0, min(X_TOT * fattore_robot - 1, int(xr // dim_robot)))
                 celle_rilevate_rumorose.add((r_rum, c_rum))
+                # persone_ferme e membri statici dei gruppi sono gli unici senza la chiave "stato": sono
+                # gli immobili per costruzione, quelli attorno a cui serve l'alone di rispetto. Una
+                # persona mobile che sta aspettando non ne ha bisogno, perche' e' gia' coperta
+                # dall'arresto di sicurezza e prima o poi riparte da sola.
+                if "stato" not in p:
+                    ferme_rilevate.append((xr, yr))
 
                 # traccia Kalman: SOLO per le persone attualmente rilevate (mai per tutta la
                 # popolazione), altrimenti con centinaia di persone il costo esploderebbe. Sempre
@@ -1443,6 +1576,27 @@ def main():
                 del tracciamento_lidar[pid_vecchio]
                 storico_posizioni_lidar.pop(pid_vecchio, None)
 
+        # alone di rispetto attorno alle persone ferme rilevate (vedi COSTO_ALONE_PERSONE_FERME). Il
+        # raggio tiene il robot fuori sia dalla zona di sicurezza sia dal contatto fra i corpi, che con
+        # certe regolazioni del pannello e' il vincolo piu' largo dei due, piu' un franco fisso.
+        raggio_alone_ferme = max(raggio_sicurezza, raggio_robot + raggio_persona) + MARGINE_ALONE_PERSONE_FERME_PX
+        mappa_costo_alone_ferme = {}
+        if ferme_rilevate:
+            costo_alone = COSTO_ALONE_PERSONE_FERME * dim_robot / DIM_NODO
+            portata_celle = int(raggio_alone_ferme // dim_robot) + 1
+            righe_robot, colonne_robot = Y_TOT * fattore_robot, X_TOT * fattore_robot
+            for xf, yf in ferme_rilevate:
+                r0, c0 = int(yf // dim_robot), int(xf // dim_robot)
+                for dr in range(-portata_celle, portata_celle + 1):
+                    for dc in range(-portata_celle, portata_celle + 1):
+                        r, c = r0 + dr, c0 + dc
+                        if not (0 <= r < righe_robot and 0 <= c < colonne_robot):
+                            continue
+                        # il confronto e' fra il CENTRO della cella e la persona: sono i centri che il
+                        # percorso attraversa, non gli spigoli
+                        if math.hypot((c + 0.5) * dim_robot - xf, (r + 0.5) * dim_robot - yf) <= raggio_alone_ferme:
+                            mappa_costo_alone_ferme[(r, c)] = costo_alone
+
         # percorso 'da proteggere' per l'isteresi (vedi piu' sotto): va catturato PRIMA dell'eventuale
         # azzeramento qui sotto, altrimenti ogni volta che l'insieme delle persone rilevate cambia anche
         # di una sola cella (capita spessissimo con una scena affollata) l'isteresi si ritroverebbe a
@@ -1465,6 +1619,11 @@ def main():
             # Al minimo (1) coincide con la griglia di movimento (quadrati), al massimo le sottocelle
             # sono cosi' piccole che la macchia appare un ellissoide continuo
             sottocelle_per_lato = max(SOTTOCELLE_PER_LATO_MIN, round(definizione_ellissoidi))
+            # la macchia deve essere almeno fine quanto la griglia su cui pianifica il robot, e un suo
+            # multiplo esatto, cosi' il collasso qui sotto e' una divisione intera senza resti. Con la
+            # griglia fine attiva e lo slider al minimo, macchia e griglia del robot coincidono: il
+            # collasso diventa l'identita' e la posizione del centro previsto arriva intatta all'A*
+            sottocelle_per_lato = fattore_robot * max(1, round(sottocelle_per_lato / fattore_robot))
             dim_sottocella = DIM_NODO / sottocelle_per_lato
             y_tot_fine, x_tot_fine = Y_TOT * sottocelle_per_lato, X_TOT * sottocelle_per_lato
             raggio_blob_sottocelle = RAGGIO_BLOB_CELLE * sottocelle_per_lato
@@ -1513,17 +1672,30 @@ def main():
                 for sottocella, peso in macchia_diffusione(griglia, rf_prev, cf_prev, raggio_blob_sottocelle, decadimento_blob_sottocella, sottocelle_per_lato, direzione=direzione_traccia).items():
                     peso_precedente = mappa_pesi_render.get(sottocella, 0.0)
                     mappa_pesi_render[sottocella] = 1.0 - (1.0 - peso_precedente) * (1.0 - peso)
-            # per l'A* (che resta sulla griglia originale) si aggregano le sottocelle nella cella grossa
-            # che le contiene, prendendo il peso massimo fra quelle che vi cadono dentro
+            # per l'A* si aggregano le sottocelle nella cella della GRIGLIA DEL ROBOT che le contiene,
+            # prendendo il peso massimo fra quelle che vi cadono dentro. Quando macchia e griglia del
+            # robot hanno la stessa risoluzione il rapporto e' 1 e l'aggregazione non perde nulla; e' con
+            # la griglia grossa che il massimo dilatava la macchia all'intera cella da 30px e annullava
+            # gli spostamenti del centro piu' piccoli di una cella.
+            # Il costo massimo si riscala con il lato della cella per la stessa ragione di
+            # COSTO_CELLA_OCCUPATA in algoritmo_a_star: attraversando il doppio di celle, ciascuna deve
+            # pesare la meta' perche' la penalita' totale della macchia resti quella tarata
+            rapporto_collasso = max(1, sottocelle_per_lato // fattore_robot)
+            costo_massimo_probabilita = COSTO_MASSIMO_PROBABILITA * dim_robot / DIM_NODO
             mappa_costo_probabilita = {}
             for (rf, cf), peso in mappa_pesi_render.items():
-                cella = (rf // sottocelle_per_lato, cf // sottocelle_per_lato)
-                costo = peso * COSTO_MASSIMO_PROBABILITA
+                cella = (rf // rapporto_collasso, cf // rapporto_collasso)
+                costo = peso * costo_massimo_probabilita
                 if cella not in mappa_costo_probabilita or mappa_costo_probabilita[cella] < costo:
                     mappa_costo_probabilita[cella] = costo
             mappa_pesi_render_dim_sottocella = dim_sottocella  # ricordata per il disegno, che avviene in un punto diverso del frame
 
         if target_pos and not robot_bloccato:
+            # il click restituisce una cella della griglia grossa: se ne prende la sottocella centrale
+            # nella griglia del robot (tutte le sue sottocelle hanno lo stesso tipo, quindi se la cella
+            # cliccata e' libera lo e' anche questa)
+            target_robot = (target_pos[0] * fattore_robot + fattore_robot // 2,
+                            target_pos[1] * fattore_robot + fattore_robot // 2)
             if not percorso or tempo_di_ricalcolare_robot:
                 # isteresi: sconto sulla prossima porzione del percorso gia' in corso, per non ribaltare
                 # la scelta fra due percorsi quasi equivalenti a ogni ricalcolo solo per rumore (vedi
@@ -1533,32 +1705,42 @@ def main():
                 # ogni DIM_NODO px, invece di contare le prime N voci della lista - cosi' copre sempre la
                 # stessa portata fisica (~CELLE_ISTERESI_PERCORSO celle) indipendentemente da quanti nodi
                 # produce la ricerca any-angle.
+                # il budget resta espresso in PIXEL (portata fisica invariata), mentre il passo di
+                # campionamento e lo sconto per cella seguono la risoluzione della griglia del robot:
+                # con celle piu' piccole se ne tocca il doppio, quindi ciascuna va scontata della meta'
                 mappa_costo_extra_robot = dict(mappa_costo_probabilita)
                 budget_isteresi_px = CELLE_ISTERESI_PERCORSO * DIM_NODO
+                costo_isteresi = COSTO_ISTERESI_PERCORSO * dim_robot / DIM_NODO
                 distanza_isteresi_percorsa = 0.0
                 for i in range(len(percorso_precedente_per_isteresi) - 1):
                     if distanza_isteresi_percorsa >= budget_isteresi_px:
                         break
                     a, b = percorso_precedente_per_isteresi[i], percorso_precedente_per_isteresi[i + 1]
                     lunghezza_segmento = math.hypot(b.cx - a.cx, b.cy - a.cy)
-                    passi_segmento = max(1, int(lunghezza_segmento / DIM_NODO))
+                    passi_segmento = max(1, int(lunghezza_segmento / dim_robot))
                     for passo_i in range(passi_segmento + 1):
                         if distanza_isteresi_percorsa >= budget_isteresi_px:
                             break
                         t = passo_i / passi_segmento
                         x = a.cx + (b.cx - a.cx) * t
                         y = a.cy + (b.cy - a.cy) * t
-                        cella = (int(y // DIM_NODO), int(x // DIM_NODO))
-                        mappa_costo_extra_robot[cella] = mappa_costo_extra_robot.get(cella, 0.0) - COSTO_ISTERESI_PERCORSO
+                        cella = (int(y // dim_robot), int(x // dim_robot))
+                        mappa_costo_extra_robot[cella] = mappa_costo_extra_robot.get(cella, 0.0) - costo_isteresi
                         distanza_isteresi_percorsa += lunghezza_segmento / passi_segmento
 
-                percorso = algoritmo_a_star(griglia, (robot_x, robot_y), target_pos, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_extra_robot)
-            meta_nodo = griglia[target_pos[0]][target_pos[1]]
+                # l'alone si applica DOPO lo sconto dell'isteresi e vince su di esso: se il percorso in
+                # corso passa addosso a una persona ferma, quella e' esattamente la situazione in cui il
+                # percorso va cambiato, non protetto
+                for cella_alone, costo_alone_cella in mappa_costo_alone_ferme.items():
+                    mappa_costo_extra_robot[cella_alone] = max(mappa_costo_extra_robot.get(cella_alone, 0.0), costo_alone_cella)
+
+                percorso = algoritmo_a_star(griglia_robot, (robot_x, robot_y), target_robot, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_extra_robot)
+            meta_nodo = griglia_robot[target_robot[0]][target_robot[1]]
             velocita_nominale_robot = VELOCITA_ROBOT * moltiplicatore_velocita
             fattore_velocita_rischio = fattore_velocita_da_conflitto(
                 robot_x, robot_y, percorso, tracciamento_lidar, velocita_nominale_robot, raggio_robot, raggio_persona
             ) if controllo_velocita_attivo else 1.0
-            robot_x, robot_y, arrivato, passo_muro = passo_movimento(robot_x, robot_y, percorso, velocita_nominale_robot * fattore_velocita_rischio, meta_nodo, griglia)
+            robot_x, robot_y, arrivato, passo_muro = passo_movimento(robot_x, robot_y, percorso, velocita_nominale_robot * fattore_velocita_rischio, meta_nodo, griglia_robot)
             if passo_muro:
                 percorso = []  # il passo tagliava un muro: ricalcola subito invece di aspettare il prossimo intervallo
             if arrivato:
@@ -1596,6 +1778,7 @@ def main():
         if muri_modificati and contatore_frame - frame_ultima_modifica_muro > 15:
             pool_persone.terminate()
             pool_persone = _crea_pool_persone(griglia)
+            griglia_robot_da_ricostruire = True  # anche la griglia fine del robot copia i muri, va rifatta
             muri_modificati = False
             richiesta_percorsi_pendente = None  # risultati del pool appena terminato: ormai invalidi
 
@@ -1762,6 +1945,21 @@ def main():
         # ha gia' usato i raggi reali e non e' influenzato da questi toggle
         raggio_sicurezza_effettivo = raggio_sicurezza if sicurezza_attiva else 0
         raggio_lidar_effettivo = raggio_lidar if lidar_attivo else 0
+
+        # celle che il pianificatore del robot considera occupate da una persona rilevata, disegnate alla
+        # risoluzione della SUA griglia: e' la resa visiva piu' diretta del guadagno della griglia fine.
+        # Con la spunta spenta ogni persona annerisce un quadrato da 30px e due persone vicine chiudono un
+        # varco in cui il robot passerebbe; con la spunta accesa il quadrato e' da 15px e il varco resta
+        # aperto. Legato a lidar_attivo perche' e' esattamente cio' che il lidar riferisce all'A*.
+        if lidar_attivo and celle_rilevate_rumorose:
+            # una sola Surface riusata per tutte le celle invece di allocarne una per cella ad ogni
+            # frame: con centinaia di persone rilevate l'allocazione ripetuta era di per se' un costo
+            sx0, sy0 = t_s(0, 0)
+            sx1, sy1 = t_s(dim_robot, dim_robot)
+            blocco_surf = pygame.Surface((max(1, sx1 - sx0), max(1, sy1 - sy0)), pygame.SRCALPHA)
+            blocco_surf.fill((*ARANCIONE, 70))
+            for (r_b, c_b) in celle_rilevate_rumorose:
+                screen.blit(blocco_surf, t_s(c_b * dim_robot, r_b * dim_robot))
 
         if percorso and len(percorso) > 1:
             punti = [t_s(n.cx, n.cy) for n in percorso]
@@ -1996,6 +2194,13 @@ def main():
             screen.blit(velocita_txt, (panel_rect.x + 15, panel_rect.y + 647))
             pygame.draw.rect(screen, VERDE if controllo_velocita_attivo else BIANCO, checkbox_velocita_rect)
             pygame.draw.rect(screen, NERO, checkbox_velocita_rect, 2)
+
+            griglia_fine_txt = font.render(
+                f"Griglia fine robot ({dim_robot}px)" if griglia_fine_attiva else f"Griglia fine robot ({DIM_NODO}px)",
+                True, NERO)
+            screen.blit(griglia_fine_txt, (panel_rect.x + 15, panel_rect.y + 684))
+            pygame.draw.rect(screen, VERDE if griglia_fine_attiva else BIANCO, checkbox_griglia_fine_rect)
+            pygame.draw.rect(screen, NERO, checkbox_griglia_fine_rect, 2)
 
             # pulsanti in fondo al pannello: salvano/azzerano su disco la configurazione (numeri, raggi,
             # toggle, velocita'), cosi' l'ambiente di test preferito e' pronto ad ogni riavvio del gioco

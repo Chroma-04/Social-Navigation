@@ -64,6 +64,11 @@ FILE_COPPIE_CSV = os.path.join(CARTELLA_RISULTATI, "validazione_coppie.csv")  # 
 FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
 
 MAPPA_DEFAULT = "training_mappa_01"
+# risoluzione della griglia di pianificazione del ROBOT, come multiplo di quella della folla (vedi
+# FATTORE_GRIGLIA_ROBOT in main.py). Il default resta 1 - cioe' il comportamento storico - perche' e' un
+# fattore sperimentale: va variato esplicitamente da chi confronta, non ereditato di nascosto, altrimenti
+# le misure gia' fatte cambierebbero significato senza che si veda dal codice del confronto.
+FATTORE_GRIGLIA_DEFAULT = 1
 REPLICHE = 8          # gruppi appaiati (stesso seed, tutte le condizioni) per ogni livello di popolazione
 FRAME_MAX = max(1, 9000 // ACCELERAZIONE)  # 150s equivalenti: oltre, la corsa conta come "non arrivata" invece di proseguire all'infinito
 
@@ -83,6 +88,12 @@ CONDIZIONE_RIFERIMENTO = "base"
 # repliche, perche' la domanda ("quale componente paga e quale costa") non dipende da una risoluzione fine
 # in densita'. Lo sweep completo si fa dopo, sulla configurazione che risulta migliore.
 LIVELLI_DIAGNOSTICI = [150, 300, 450]
+# Giro esplorativo: una sola replica per livello, cinque livelli fino alla popolazione massima. Serve a
+# vedere in fretta se un effetto esiste e di che segno e', non a quantificarlo: con una replica sola per
+# livello non c'e' alcuna stima dell'incertezza, e la differenza fra due condizioni su un singolo seed puo'
+# essere interamente dovuta a quale folla e' capitata. L'unica cosa che rende leggibile un giro cosi' e' la
+# COERENZA fra i livelli: un effetto vero mantiene lo stesso segno salendo di densita', il rumore no.
+LIVELLI_RAPIDI = [150, 250, 350, 450, 550]
 
 torch.set_num_threads(1)  # stesso motivo di main.py: batch minuscoli, il multithreading di torch costa piu' di quanto renda
 
@@ -123,10 +134,17 @@ def _cella_vicina_angolo(griglia, r_angolo, c_angolo):
     return min(libere, key=lambda n: (n.r - r_angolo) ** 2 + (n.c - c_angolo) ** 2)
 
 
-def _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello_ai, orizzonte):
+def _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello_ai, orizzonte,
+                 fattore_griglia=1):
     """Ricostruisce la macchia di probabilita' come in main.py (un solo batch per la correzione AI,
-    stessa ottimizzazione), sulla griglia di movimento invece che sulla sotto-griglia fine del rendering.
-    Le persone ferme non vengono proiettate nel futuro: restano dove sono."""
+    stessa ottimizzazione), sulla griglia su cui pianifica il robot. Le persone ferme non vengono
+    proiettate nel futuro: restano dove sono.
+
+    Con fattore_griglia > 1 la macchia si costruisce alla risoluzione fine del robot: il raggio in
+    sottocelle e il decadimento per sottocella sono riscalati in modo che l'ellisse resti fisicamente
+    IDENTICA (stessi pixel di estensione, stesso profilo di decadimento) - cambia solo quanto finemente
+    e' campionata. Cosi' il confronto fra le due risoluzioni isola l'effetto della quantizzazione e non
+    lo confonde con una macchia piu' piccola o piu' morbida."""
     correzioni_ai = {}
     if usa_ai:
         pid_ok, storici_ok = [], []
@@ -143,6 +161,15 @@ def _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello
                 correzioni = modello_ai(torch.from_numpy(batch)).numpy()
             correzioni_ai = dict(zip(pid_ok, correzioni))
 
+    dim_robot = sim.DIM_NODO / fattore_griglia
+    raggio_sottocelle = sim.RAGGIO_BLOB_CELLE * fattore_griglia      # stesso raggio in pixel
+    decadimento = sim.DECADIMENTO_BLOB ** (1 / fattore_griglia)      # stesso decadimento per pixel
+    # costo per cella dimezzato quando le celle sono la meta': le distanze si accumulano in pixel ma i
+    # costi per cella attraversata, quindi senza questo la macchia peserebbe il doppio (vedi
+    # algoritmo_a_star in main.py)
+    costo_massimo = sim.COSTO_MASSIMO_PROBABILITA / fattore_griglia
+    righe, colonne = sim.Y_TOT * fattore_griglia, sim.X_TOT * fattore_griglia
+
     costi = {}
     for pid, traccia in tracciamento_lidar.items():
         e_ferma = traccia.get("ferma", False)
@@ -153,21 +180,24 @@ def _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello
         if correzione is not None:
             x_prev += float(correzione[0])
             y_prev += float(correzione[1])
-        rf = max(0, min(sim.Y_TOT - 1, int(y_prev // sim.DIM_NODO)))
-        cf = max(0, min(sim.X_TOT - 1, int(x_prev // sim.DIM_NODO)))
-        macchia = sim.macchia_diffusione(griglia, rf, cf, sim.RAGGIO_BLOB_CELLE, sim.DECADIMENTO_BLOB, 1,
+        rf = max(0, min(righe - 1, int(y_prev // dim_robot)))
+        cf = max(0, min(colonne - 1, int(x_prev // dim_robot)))
+        macchia = sim.macchia_diffusione(griglia, rf, cf, raggio_sottocelle, decadimento, fattore_griglia,
                                          direzione=direzione)
         for cella, peso in macchia.items():
-            costo = peso * sim.COSTO_MASSIMO_PROBABILITA
+            costo = peso * costo_massimo
             if cella not in costi or costi[cella] < costo:
                 costi[cella] = costo
     return costi
 
 
-def esegui_corsa(nome_mappa, condizione, popolazione, seed):
+def esegui_corsa(nome_mappa, condizione, popolazione, seed, fattore_griglia=FATTORE_GRIGLIA_DEFAULT):
     """Una traversata angolo->angolo. 'condizione': 'prima' = solo Kalman a velocita' costante,
     'dopo' = Kalman + correzione AI + velocita' predittiva. Con lo stesso 'seed' la folla iniziale e'
     identica fra le due condizioni (vedi il disegno sperimentale in testa al file).
+
+    'fattore_griglia' e' la risoluzione della griglia su cui pianifica il ROBOT, come multiplo di quella
+    della folla (toggle "Griglia fine robot" del pannello). La folla resta sempre su DIM_NODO.
 
     Ritorna (arrivato, frame_impiegati, frame_fermo_sicurezza); frame_impiegati vale FRAME_MAX se non e'
     arrivato entro il tetto."""
@@ -224,6 +254,37 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed):
     arrivo = _cella_vicina_angolo(griglia, sim.Y_TOT - 1, sim.X_TOT - 1)
     robot = {"x": partenza.cx, "y": partenza.cy, "percorso": []}
     tracciamento_lidar, storico_posizioni = {}, {}
+    # griglia di pianificazione del robot: identica a `griglia` con fattore 1, altrimenti piu' fine.
+    # Arrivo e celle bloccate vanno riespressi nelle sue coordinate
+    griglia_robot = sim.crea_griglia_robot(griglia, fattore_griglia)
+    dim_robot = sim.DIM_NODO / fattore_griglia
+    arrivo_robot = griglia_robot[arrivo.r * fattore_griglia + fattore_griglia // 2][
+        arrivo.c * fattore_griglia + fattore_griglia // 2]
+    # alone di rispetto attorno alle persone ferme, come main.py (vedi COSTO_ALONE_PERSONE_FERME): senza,
+    # il robot le rasenta o le attraversa, perche' non ostruiscono fisicamente il moto e non attivano
+    # l'arresto di sicurezza. Qui e' precalcolato una volta sola (sono immobili per definizione) e su
+    # TUTTE, non solo su quelle rilevate dal lidar: in questo banco di prova anche le celle occupate sono
+    # gia' note al robot senza passare dal rilevamento, la semplificazione e' quella e vale identica in
+    # tutte le condizioni, quindi non ne favorisce nessuna
+    raggio_alone_ferme = max(raggio_sicurezza, raggio_robot + raggio_persona) + sim.MARGINE_ALONE_PERSONE_FERME_PX
+    costo_alone_ferme = {}
+    portata_alone = int(raggio_alone_ferme // dim_robot) + 1
+    righe_robot, colonne_robot = len(griglia_robot), len(griglia_robot[0])
+    for pf in persone_ferme + membri_fermi:
+        r0, c0 = int(pf["y"] // dim_robot), int(pf["x"] // dim_robot)
+        for dr in range(-portata_alone, portata_alone + 1):
+            for dc in range(-portata_alone, portata_alone + 1):
+                r, c = r0 + dr, c0 + dc
+                if not (0 <= r < righe_robot and 0 <= c < colonne_robot):
+                    continue
+                if math.hypot((c + 0.5) * dim_robot - pf["x"], (r + 0.5) * dim_robot - pf["y"]) <= raggio_alone_ferme:
+                    costo_alone_ferme[(r, c)] = sim.COSTO_ALONE_PERSONE_FERME * dim_robot / sim.DIM_NODO
+    # isteresi sul percorso, come main.py: senza, due percorsi di costo quasi identico si alternano ad
+    # ogni ricalcolo per pura fluttuazione della mappa di costo. Era assente da questo banco di prova, e
+    # la sua assenza penalizza in modo specifico le condizioni che rendono la mappa piu' rumorosa (l'AI,
+    # e la griglia fine che moltiplica i percorsi quasi equivalenti): senza, il confronto e' viziato
+    budget_isteresi_px = sim.CELLE_ISTERESI_PERCORSO * sim.DIM_NODO
+    costo_isteresi = sim.COSTO_ISTERESI_PERCORSO / fattore_griglia
 
     range_evitamento_quad = sim.RANGE_EVITAMENTO_PERSONE ** 2
     range_evitamento_robot = raggio_robot + raggio_persona
@@ -234,9 +295,18 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed):
     for contatore_frame in range(FRAME_MAX):
         robot_x, robot_y = robot["x"], robot["y"]
 
-        celle_bloccate = {(int(p["y"] // sim.DIM_NODO), int(p["x"] // sim.DIM_NODO)) for p in tutte_mobili}
-        celle_bloccate |= celle_ferme
-        celle_bloccate_comune = celle_bloccate | {(int(robot_y // sim.DIM_NODO), int(robot_x // sim.DIM_NODO))}
+        # celle occupate: quelle della FOLLA restano sulla griglia grossa (e' la loro griglia di
+        # pianificazione), quelle viste dal ROBOT sulla sua. E' qui che nasce il guadagno sui varchi:
+        # una persona larga ~14px blocca una cella da 15px invece di annerirne una da 30
+        celle_bloccate_comune = {(int(p["y"] // sim.DIM_NODO), int(p["x"] // sim.DIM_NODO)) for p in tutte_mobili}
+        celle_bloccate_comune |= celle_ferme
+        celle_bloccate_comune.add((int(robot_y // sim.DIM_NODO), int(robot_x // sim.DIM_NODO)))
+        if fattore_griglia == 1:
+            celle_bloccate = celle_bloccate_comune - {(int(robot_y // sim.DIM_NODO), int(robot_x // sim.DIM_NODO))}
+        else:
+            celle_bloccate = {(int(p["y"] // dim_robot), int(p["x"] // dim_robot)) for p in tutte_mobili}
+            celle_bloccate |= {(int(p["y"] // dim_robot), int(p["x"] // dim_robot))
+                               for p in persone_ferme + membri_fermi}
 
         _ricalcola_percorsi(tutte_mobili, contatore_frame, griglia, celle_bloccate_comune)
         griglia_spaziale = sim.costruisci_griglia_spaziale(tutte_mobili, sim.DIM_NODO)
@@ -246,14 +316,41 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed):
 
         if contatore_frame % intervallo_macchia == 0:
             costi = _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello_ai,
-                                 orizzonte_previsione)
+                                 orizzonte_previsione, fattore_griglia)
 
         if not robot["percorso"] or contatore_frame % intervallo_ricalcolo == 0:
-            robot["percorso"] = sim.algoritmo_a_star(griglia, (robot["x"], robot["y"]), (arrivo.r, arrivo.c),
-                                                     celle_bloccate=celle_bloccate, mappa_costo_extra=costi)
+            # sconto sulla porzione di percorso gia' in corso, camminando lungo la geometria reale dei
+            # segmenti (con Theta* un segmento puo' coprire molte celle): portata fissa in pixel,
+            # campionamento e sconto alla risoluzione della griglia del robot
+            costo_extra = dict(costi)
+            distanza_scontata = 0.0
+            for i in range(len(robot["percorso"]) - 1):
+                if distanza_scontata >= budget_isteresi_px:
+                    break
+                a, b = robot["percorso"][i], robot["percorso"][i + 1]
+                lunghezza = math.hypot(b.cx - a.cx, b.cy - a.cy)
+                passi = max(1, int(lunghezza / dim_robot))
+                for passo_i in range(passi + 1):
+                    if distanza_scontata >= budget_isteresi_px:
+                        break
+                    q = passo_i / passi
+                    cella = (int((a.cy + (b.cy - a.cy) * q) // dim_robot),
+                             int((a.cx + (b.cx - a.cx) * q) // dim_robot))
+                    costo_extra[cella] = costo_extra.get(cella, 0.0) - costo_isteresi
+                    distanza_scontata += lunghezza / passi
+
+            # l'alone vince sullo sconto dell'isteresi: un percorso che passa addosso a una persona ferma
+            # va cambiato, non protetto
+            for cella_alone, costo_cella in costo_alone_ferme.items():
+                costo_extra[cella_alone] = max(costo_extra.get(cella_alone, 0.0), costo_cella)
+
+            robot["percorso"] = sim.algoritmo_a_star(griglia_robot, (robot["x"], robot["y"]),
+                                                     (arrivo_robot.r, arrivo_robot.c),
+                                                     celle_bloccate=celle_bloccate, mappa_costo_extra=costo_extra)
 
         # stop di sicurezza, identico a main.py: una persona in movimento troppo vicina blocca del tutto
-        # il robot per questo frame (vedi il commento in testa al file sul perche' e' essenziale)
+        # il robot per questo frame (vedi il commento in testa al file sul perche' e' essenziale). Solo
+        # i corpi mobili: su una persona ferma lo stop non si scioglierebbe mai (vedi main.py)
         if raggio_sicurezza > 0 and any(math.hypot(robot["x"] - p["x"], robot["y"] - p["y"]) < raggio_sicurezza
                                         for p in tutte_mobili):
             frame_fermo += 1
@@ -266,7 +363,7 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed):
                 raggio_robot, raggio_persona)
 
         x, y, arrivato, bloccato = sim.passo_movimento(robot["x"], robot["y"], robot["percorso"],
-                                                       velocita_nominale * fattore, arrivo, griglia)
+                                                       velocita_nominale * fattore, arrivo_robot, griglia_robot)
         robot["x"], robot["y"] = x, y
         if bloccato:
             robot["percorso"] = []
@@ -283,9 +380,9 @@ def _esegui_gruppo(argomenti):
     L'ordine e' ininfluente: ogni corsa riparte da random.seed(seed) e ricostruisce mappa, folla e robot
     da zero, quindi nessuno stato passa dall'una all'altra. Verificato empiricamente: la stessa corsa con
     lo stesso seed da' risultati identici al frame, indipendentemente da cosa e' girato prima."""
-    nome_mappa, popolazione, totale, seed = argomenti
+    nome_mappa, popolazione, totale, seed, condizioni = argomenti
     risultati = {}
-    for condizione in CONDIZIONI:
+    for condizione in condizioni:
         arrivato, frame, fermo = esegui_corsa(nome_mappa, condizione, popolazione, seed)
         risultati[condizione] = (arrivato, frame, fermo)
     return totale, seed, risultati
@@ -318,8 +415,14 @@ def _statistiche_appaiate(coppie):
     return media, errore_standard, percentuale, vittorie
 
 
-def confronta(nome_mappa=MAPPA_DEFAULT, repliche=REPLICHE, livelli=None):
+def confronta(nome_mappa=MAPPA_DEFAULT, repliche=REPLICHE, livelli=None, condizioni=None):
+    """'condizioni' permette di restringere il confronto a un sottoinsieme (deve comunque contenere
+    CONDIZIONE_RIFERIMENTO, che e' il termine di paragone di tutte le altre): con due sole condizioni il
+    numero di corse si dimezza, al prezzo di non poter piu' separare il contributo dei due componenti."""
     livelli = livelli or list(range(POPOLAZIONE_MIN, POPOLAZIONE_MAX + 1, POPOLAZIONE_PASSO))
+    condizioni = list(condizioni or CONDIZIONI)
+    if CONDIZIONE_RIFERIMENTO not in condizioni:
+        raise ValueError(f"le condizioni devono includere '{CONDIZIONE_RIFERIMENTO}': e' il riferimento del confronto appaiato")
     geometria = _geometria_salvata()
 
     compiti = []
@@ -330,7 +433,7 @@ def confronta(nome_mappa=MAPPA_DEFAULT, repliche=REPLICHE, livelli=None):
             # crc32 e non hash(): hash() sulle stringhe e' randomizzato ad ogni avvio di Python, il
             # seed nominale non sarebbe riproducibile fra un run e l'altro
             seed = zlib.crc32(f"{nome_mappa}|{totale}|{i}".encode())
-            compiti.append((nome_mappa, popolazione, totale, seed))
+            compiti.append((nome_mappa, popolazione, totale, seed, condizioni))
     # i livelli densi costano molto piu' calcolo: mescolati si spargono fra i worker invece di
     # accumularsi tutti in coda, dove lascerebbero i worker scarichi ad aspettarne uno solo
     random.shuffle(compiti)
@@ -338,8 +441,8 @@ def confronta(nome_mappa=MAPPA_DEFAULT, repliche=REPLICHE, livelli=None):
     n_worker = min(8, os.cpu_count() or 4)
     print(f"Validazione appaiata fattoriale su {nome_mappa}")
     print(f"  livelli di popolazione: {livelli}")
-    print(f"  condizioni: {', '.join(CONDIZIONI)}")
-    print(f"  {len(compiti)} gruppi appaiati x {len(CONDIZIONI)} condizioni = {len(compiti) * len(CONDIZIONI)} corse")
+    print(f"  condizioni: {', '.join(condizioni)}")
+    print(f"  {len(compiti)} gruppi appaiati x {len(condizioni)} condizioni = {len(compiti) * len(condizioni)} corse")
     print(f"  geometria da config: robot {geometria['raggio_robot']:.1f}px, persone {geometria['raggio_persona']:.1f}px, "
           f"sicurezza {geometria['raggio_sicurezza']:.1f}px, lidar {geometria['raggio_lidar']:.0f}px")
     print(f"  accelerazione {ACCELERAZIONE}x, {n_worker} processi\n")
@@ -355,14 +458,15 @@ def confronta(nome_mappa=MAPPA_DEFAULT, repliche=REPLICHE, livelli=None):
                 print(f"  [{completate}/{len(compiti)}] gruppi completati ({time.time() - inizio:.0f}s)")
 
     print(f"\nCompletato in {time.time() - inizio:.1f}s\n")
-    _riporta(nome_mappa, livelli, risultati)
+    _riporta(nome_mappa, livelli, risultati, condizioni)
 
 
-def _riporta(nome_mappa, livelli, risultati):
+def _riporta(nome_mappa, livelli, risultati, condizioni=None):
     """Ogni condizione confrontata con CONDIZIONE_RIFERIMENTO sugli stessi seed. I gruppi in cui anche una
     sola condizione non e' arrivata vengono scartati interi: confrontare condizioni su insiemi di seed
     diversi romperebbe l'appaiamento, che e' l'unica ragione per cui questo test e' sensibile."""
-    altre = [c for c in CONDIZIONI if c != CONDIZIONE_RIFERIMENTO]
+    condizioni = list(condizioni or CONDIZIONI)
+    altre = [c for c in condizioni if c != CONDIZIONE_RIFERIMENTO]
     print(f"=== Confronto appaiato contro '{CONDIZIONE_RIFERIMENTO}': stessa folla, stesso percorso, robot diverso ===")
     print("(differenza positiva = arriva prima della base; 'vinti' = gruppi in cui ha fatto meglio)\n")
     intestazione = (f"{'persone':>8}{'condizione':>15}{'t_base':>9}{'t_cond':>9}{'diff':>9}{'err.std':>9}"
@@ -376,7 +480,7 @@ def _riporta(nome_mappa, livelli, risultati):
         gruppi_validi = []
         scartati = 0
         for seed, esito in risultati[totale]:
-            if not all(esito[c][0] for c in CONDIZIONI):
+            if not all(esito[c][0] for c in condizioni):
                 scartati += 1
                 continue
             gruppi_validi.append((seed, esito))
@@ -386,7 +490,7 @@ def _riporta(nome_mappa, livelli, risultati):
 
         for seed, esito in gruppi_validi:
             riga = {"mappa": nome_mappa, "popolazione": totale, "seed": seed}
-            for c in CONDIZIONI:
+            for c in condizioni:
                 riga[f"tempo_{c}_s"] = round(_secondi(esito[c][1]), 2)
                 riga[f"fermo_{c}_s"] = round(_secondi(esito[c][2]), 2)
             righe_gruppi.append(riga)
@@ -492,7 +596,12 @@ def _stima_risparmio(percentuale_risparmio):
 if __name__ == "__main__":
     argomenti = [a for a in sys.argv[1:] if not a.startswith("--")]
     mappa = argomenti[0] if argomenti else MAPPA_DEFAULT
-    if "--diagnostica" in sys.argv:
+    if "--rapido" in sys.argv:
+        # dieci semi diversi alla sola popolazione massima, e solo AI acceso contro AI spento: 20 corse.
+        # E' il confronto piu' stretto possibile sulla domanda "l'AI fa arrivare prima?", al prezzo di non
+        # sapere nulla del controllo di velocita' ne' di come l'effetto vari con la densita'
+        confronta(mappa, repliche=10, livelli=[POPOLAZIONE_MAX], condizioni=["base", "solo_ai"])
+    elif "--diagnostica" in sys.argv:
         # pochi livelli rappresentativi: serve a capire quale componente paga, non a tracciare la curva
         confronta(mappa, livelli=LIVELLI_DIAGNOSTICI)
     else:
