@@ -9,7 +9,12 @@ import collections
 import multiprocessing as mp
 
 # --- CONFIGURAZIONE ---
-X_TOT, Y_TOT = 80, 60
+X_TOT_STANDARD, Y_TOT_STANDARD = 80, 60
+X_TOT_POVO, Y_TOT_POVO = 44, 73  # griglia dedicata alla planimetria reale (modalita' Povo, tasto P)
+# griglie riconosciute al caricamento di una mappa: da queste si deduce in quale modalita' entrare
+DIMENSIONI_GRIGLIA_NOTE = ((X_TOT_STANDARD, Y_TOT_STANDARD), (X_TOT_POVO, Y_TOT_POVO))
+# dimensioni correnti: non sono costanti, il tasto P le riassegna tramite applica_dimensioni_griglia
+X_TOT, Y_TOT = X_TOT_STANDARD, Y_TOT_STANDARD
 DIM_NODO = 30
 LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
 VELOCITA_ROBOT = 1.5
@@ -38,12 +43,25 @@ INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone, in frame
 CARTELLA_MAPPE_SALVATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappe_salvate")
 CARTELLA_MAPPE_TRAINING = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappe_training")
 CARTELLA_MAPPE_TESTING = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mappe_testing")
+CARTELLA_PLANIMETRIE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "planimetrie")
+# gli slot 0-2 stanno sulla griglia standard, l'ultimo sulla griglia Povo: il menu ne mostra uno solo
+# dei due insiemi per volta, perche' una mappa 44x73 caricata su griglia 80x60 sposta i muri
+SLOT_MAPPA_POVO = 3
 FILE_MAPPA_SLOT = [
     os.path.join(CARTELLA_MAPPE_SALVATE, "mappa_salvata.json"),
     os.path.join(CARTELLA_MAPPE_SALVATE, "mappa_salvata_2.json"),
     os.path.join(CARTELLA_MAPPE_SALVATE, "mappa_salvata_3.json"),
+    os.path.join(CARTELLA_MAPPE_SALVATE, "mappa_povo.json"),
 ]
 PASSWORD_SALVATAGGIO = "1258"
+# overlay della planimetria: trasparenza, e allineamento fine rispetto alla griglia (frecce e PagSu/PagGiu)
+ALPHA_PLANIMETRIA_MIN, ALPHA_PLANIMETRIA_MAX = 0, 255
+ALPHA_PLANIMETRIA_DEFAULT = 90
+PASSO_OFFSET_PLANIMETRIA_PX = 5  # px-mappa per pressione di freccia
+PASSO_SCALA_PLANIMETRIA = 0.01
+SCALA_PLANIMETRIA_MIN, SCALA_PLANIMETRIA_MAX = 0.2, 3.0
+PIXEL_MAX_SMOOTHSCALE = 12_000_000  # oltre questa area la planimetria si riscala col metodo veloce
+PASSO_SCROLL_PANNELLO = 40  # px di scorrimento del pannello tecnico per scatto di rotella
 FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
 VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 25.0
 NUMERO_PERSONE_DEFAULT = 0
@@ -244,6 +262,17 @@ def crea_griglia_robot(griglia_base, fattore):
             if riga_base[c // fattore].tipo == "muro":
                 riga_fine[c].tipo = "muro"
     return fine
+
+def applica_dimensioni_griglia(x_tot, y_tot):
+    """Riassegna le dimensioni della griglia valide per tutto il modulo.
+
+    X_TOT/Y_TOT sono lette come globali da crea_bordi, sottocella_e_muro, macchia_diffusione, dai clamp
+    del rilevamento lidar e dall'inizializzazione dei worker: passare qui e' meno invasivo che filtrare
+    le dimensioni attraverso ogni firma. LARGHEZZA/ALTEZZA vanno ricalcolate insieme, perche'
+    limita_zoom_pan ci appoggia sopra l'estensione della mappa."""
+    global X_TOT, Y_TOT, LARGHEZZA, ALTEZZA
+    X_TOT, Y_TOT = x_tot, y_tot
+    LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
 
 def crea_bordi(griglia):
     for r in range(Y_TOT):
@@ -672,11 +701,27 @@ def fattore_velocita_da_conflitto(x, y, percorso, tracciamento_lidar, velocita_n
     urgenza = 1.0 - min(1.0, tempo_minimo_conflitto_nominale / FRAME_REAZIONE_VELOCITA_ROBOT)
     return 1.0 - urgenza * (1.0 - FATTORE_VELOCITA_ROBOT_MIN)
 
-def salva_mappa(griglia, path):
+def carica_planimetria(cartella=CARTELLA_PLANIMETRIE):
+    """Prima immagine trovata nella cartella delle planimetrie, da usare come sfondo su cui ricalcare i
+    muri a mano. Ritorna None se la cartella manca o non contiene immagini leggibili: l'overlay e'
+    facoltativo e la modalita' Povo funziona lo stesso."""
+    if not os.path.isdir(cartella):
+        return None
+    for nome in sorted(os.listdir(cartella)):
+        if nome.lower().endswith((".png", ".jpg", ".jpeg")):
+            try:
+                return pygame.image.load(os.path.join(cartella, nome)).convert_alpha()
+            except pygame.error:
+                continue
+    return None
+
+def salva_mappa(griglia, path, con_dimensioni=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     muri = [[n.r, n.c] for riga in griglia for n in riga if n.tipo == "muro"]
     with open(path, "w") as f:
-        json.dump(muri, f)
+        # lo slot Povo salva anche le dimensioni usate, cosi' il caricamento puo' rifiutare una mappa
+        # nata su una griglia diversa invece di piazzarne i muri fuori posto
+        json.dump({"x_tot": X_TOT, "y_tot": Y_TOT, "muri": muri} if con_dimensioni else muri, f)
 
 def salva_mappa_training(griglia, cartella=CARTELLA_MAPPE_TRAINING):
     """Salva la mappa con nome progressivo nella cartella delle mappe di training, che
@@ -699,11 +744,27 @@ def carica_configurazione_pannello(path):
     with open(path, "r") as f:
         return json.load(f)
 
+def leggi_mappa(path):
+    """(muri, x_tot, y_tot) letti dal file. Le dimensioni sono None nel formato vecchio, che contiene
+    la sola lista dei muri."""
+    with open(path, "r") as f:
+        dati = json.load(f)
+    if isinstance(dati, dict):
+        return dati.get("muri", []), dati.get("x_tot"), dati.get("y_tot")
+    return dati, None, None
+
+def dimensioni_mappa(path):
+    """Griglia su cui e' nata una mappa salvata. Il formato vecchio non riporta le dimensioni: quelle
+    mappe sono tutte anteriori alla modalita' Povo, quindi sono per forza sulla griglia standard."""
+    _, x_tot_salvato, y_tot_salvato = leggi_mappa(path)
+    if x_tot_salvato is None:
+        return X_TOT_STANDARD, Y_TOT_STANDARD
+    return x_tot_salvato, y_tot_salvato
+
 def carica_mappa(griglia, path):
     if not os.path.exists(path):
         return False
-    with open(path, "r") as f:
-        muri = json.load(f)
+    muri, _, _ = leggi_mappa(path)
     for riga in griglia:
         for n in riga:
             n.tipo = "libero"
@@ -719,8 +780,11 @@ def carica_mappa(griglia, path):
 # ricade sul calcolo sequenziale
 _pool_worker_griglia = None
 
-def _pool_inizializza_worker(celle_muro):
+def _pool_inizializza_worker(celle_muro, x_tot, y_tot):
     global _pool_worker_griglia
+    # con lo spawn di Windows il worker re-importa il modulo e riparte dalle dimensioni di default:
+    # vanno riapplicate qui, altrimenti in modalita' Povo la sua griglia avrebbe la misura sbagliata
+    applica_dimensioni_griglia(x_tot, y_tot)
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
     for r, c in celle_muro:
@@ -736,7 +800,7 @@ def _celle_muro_di(griglia):
 
 def _crea_pool_persone(griglia):
     n_worker = min(8, os.cpu_count() or 4)
-    return mp.Pool(n_worker, initializer=_pool_inizializza_worker, initargs=(_celle_muro_di(griglia),))
+    return mp.Pool(n_worker, initializer=_pool_inizializza_worker, initargs=(_celle_muro_di(griglia), X_TOT, Y_TOT))
 
 def main():
     # import locali e non di modulo: i worker del pool re-importano main.py per intero ma non usano
@@ -755,7 +819,7 @@ def main():
     win_h = min(ALTEZZA, int(info.current_h * 0.9))
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
     pygame.key.start_text_input()
-    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | F11: Fullscreen | F5: Salva | F9: Carica | T: Salva mappa training | TAB: Pannello")
+    pygame.display.set_caption("Simulazione - Zoom: Rote. | Pan: Tasto DX | Muri: Tasto W | P: Mappa Povo | F11: Fullscreen | F5: Salva | F9: Carica | T: Salva mappa training | TAB: Pannello")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 32)
     font_piccolo = pygame.font.SysFont(None, 24)
@@ -775,7 +839,25 @@ def main():
     frame_inizio_target = None  # frame in cui e' stato assegnato il target attuale (click): serve a calcolare il tempo di percorrenza all'arrivo
     messaggio_arrivo_timer = 0
     messaggio_arrivo_testo = ""
-    
+
+    # --- modalita' Povo: griglia dedicata alla planimetria reale e relativo overlay ---
+    modalita_povo = False
+    # la commutazione e il caricamento non avvengono dentro la gestione eventi ma subito dopo, in un
+    # punto solo: cosi' scegliere una mappa nata sull'altra griglia porta con se' il cambio di griglia
+    modalita_povo_richiesta = False
+    mappa_da_caricare = None
+    rigenera_popolazione = False
+    planimetria_originale = None   # immagine a risoluzione piena, sorgente di ogni riscalatura
+    planimetria_scalata = None     # versione a schermo, rigenerata solo al variare di zoom o scala
+    planimetria_chiave_scalata = None
+    planimetria_visibile = True
+    alpha_planimetria = ALPHA_PLANIMETRIA_DEFAULT
+    trascinando_alpha_planimetria = False
+    scala_planimetria_x = scala_planimetria_y = 1.0
+    offset_planimetria_x = offset_planimetria_y = 0.0
+    messaggio_mappa_timer = 0  # avvisi su caricamento mappa rifiutato o modalita' cambiata
+    messaggio_mappa_testo = ("", VERDE)
+
     griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
     crea_bordi(griglia)
     # griglia su cui pianifica solo il robot; la folla continua a usare `griglia`
@@ -826,6 +908,7 @@ def main():
     numero_persone_ferme = NUMERO_PERSONE_FERME_DEFAULT
     numero_gruppi = NUMERO_GRUPPI_DEFAULT
     pannello_aperto = False
+    scroll_pannello = 0  # px di cui il pannello e' alzato, quando non ci sta tutto nella finestra
     moltiplicatore_velocita = 1.0
     trascinando_slider = False
     modificando_persone = False
@@ -874,6 +957,12 @@ def main():
         ellissoidi_attivi = configurazione_salvata.get("ellissoidi_attivi", ellissoidi_attivi)
         ai_attiva = configurazione_salvata.get("ai_attiva", ai_attiva)
         controllo_velocita_attivo = configurazione_salvata.get("controllo_velocita_attivo", controllo_velocita_attivo)
+        planimetria_visibile = configurazione_salvata.get("planimetria_visibile", planimetria_visibile)
+        alpha_planimetria = configurazione_salvata.get("alpha_planimetria", alpha_planimetria)
+        scala_planimetria_x = configurazione_salvata.get("scala_planimetria_x", scala_planimetria_x)
+        scala_planimetria_y = configurazione_salvata.get("scala_planimetria_y", scala_planimetria_y)
+        offset_planimetria_x = configurazione_salvata.get("offset_planimetria_x", offset_planimetria_x)
+        offset_planimetria_y = configurazione_salvata.get("offset_planimetria_y", offset_planimetria_y)
 
     # --- popolazione iniziale ---
     persone = [crea_persona(griglia) for _ in range(numero_persone)]
@@ -890,6 +979,26 @@ def main():
         # conversione mappa <-> schermo
         def t_s(x, y): return int(x * zoom + offset_x), int(y * zoom + offset_y)
         def t_m(sx, sy): return (sx - offset_x) / zoom, (sy - offset_y) / zoom
+
+        # 0b. planimetria di sfondo: sta sotto la scacchiera, cosi' la griglia resta leggibile sopra e si
+        # possono ricalcare i muri. Segue zoom e pan come la griglia, piu' scala e offset di allineamento
+        if modalita_povo and planimetria_visibile and planimetria_originale is not None:
+            chiave_scala = (round(zoom, 4), round(scala_planimetria_x, 3), round(scala_planimetria_y, 3))
+            if chiave_scala != planimetria_chiave_scalata:
+                # riscalatura sempre dall'originale, e solo quando cambia: uno smoothscale per frame
+                # costerebbe caro, e ripartire dall'ultima scalata accumulerebbe perdita di qualita'
+                larghezza_planimetria = max(1, int(LARGHEZZA * zoom * scala_planimetria_x))
+                altezza_planimetria = max(1, int(ALTEZZA * zoom * scala_planimetria_y))
+                # oltre il budget di pixel si passa alla scalatura veloce: a zoom alto lo smoothscale
+                # costa decimi di secondo, e a quell'ingrandimento la differenza non si vede
+                riscala = (pygame.transform.scale
+                           if larghezza_planimetria * altezza_planimetria > PIXEL_MAX_SMOOTHSCALE
+                           else pygame.transform.smoothscale)
+                planimetria_scalata = riscala(planimetria_originale, (larghezza_planimetria, altezza_planimetria))
+                planimetria_chiave_scalata = chiave_scala
+            planimetria_scalata.set_alpha(int(alpha_planimetria))
+            screen.blit(planimetria_scalata, (int(offset_x + offset_planimetria_x * zoom),
+                                              int(offset_y + offset_planimetria_y * zoom)))
 
         # 1. griglia, solo le celle visibili nella viewport
         cella_px = DIM_NODO * zoom
@@ -921,9 +1030,13 @@ def main():
                             pygame.draw.line(screen, GRIGIO_SOTTOGRIGLIA, (xk, sy), (xk, ey - 1))
                             pygame.draw.line(screen, GRIGIO_SOTTOGRIGLIA, (sx, yk), (ex - 1, yk))
 
-        # layout del pannello tecnico, ricalcolato ogni frame per seguire il ridimensionamento
-        panel_w, panel_h = 370, 765
-        panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20, panel_w, panel_h)
+        # layout del pannello tecnico, ricalcolato ogni frame per seguire il ridimensionamento. Su una
+        # finestra piu' bassa del pannello i controlli in fondo starebbero fuori schermo: lo scorrimento
+        # alza tutto il blocco, e ogni rettangolo figlio lo segue perche' e' ancorato a panel_rect.y
+        panel_w, panel_h = 370, 850
+        scroll_pannello_max = max(0, panel_h - (screen.get_height() - 40))
+        scroll_pannello = max(0, min(scroll_pannello_max, scroll_pannello))
+        panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20 - scroll_pannello, panel_w, panel_h)
         slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
         numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
         numero_corridori_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 135, 70, 30)
@@ -940,11 +1053,13 @@ def main():
         checkbox_ai_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 608, 20, 20)
         checkbox_velocita_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 645, 20, 20)
         checkbox_griglia_fine_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 682, 20, 20)
+        checkbox_planimetria_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 719, 20, 20)
+        slider_planimetria_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 751, panel_w - 30, 8)
         # pulsanti sempre in fondo al pannello, per avere l'ambiente di test preferito pronto ad ogni avvio
         larghezza_pulsante_config = (panel_w - 30 - 20) // 3
-        button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 715, larghezza_pulsante_config, 35)
-        button_carica_config_rect = pygame.Rect(button_salva_config_rect.right + 10, panel_rect.y + 715, larghezza_pulsante_config, 35)
-        button_reset_config_rect = pygame.Rect(button_carica_config_rect.right + 10, panel_rect.y + 715, larghezza_pulsante_config, 35)
+        button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 800, larghezza_pulsante_config, 35)
+        button_carica_config_rect = pygame.Rect(button_salva_config_rect.right + 10, panel_rect.y + 800, larghezza_pulsante_config, 35)
+        button_reset_config_rect = pygame.Rect(button_carica_config_rect.right + 10, panel_rect.y + 800, larghezza_pulsante_config, 35)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -985,7 +1100,10 @@ def main():
                 if event.button == 1 and modificando_gruppi and not numero_gruppi_box_rect.collidepoint(event.pos):
                     modificando_gruppi = False
 
-                if event.button == 1 and pannello_aperto and panel_rect.collidepoint(event.pos):
+                if event.button in (4, 5) and pannello_aperto and panel_rect.collidepoint(event.pos):
+                    # rotella sopra il pannello: scorre il pannello invece di zoomare la mappa
+                    scroll_pannello += PASSO_SCROLL_PANNELLO if event.button == 5 else -PASSO_SCROLL_PANNELLO
+                elif event.button == 1 and pannello_aperto and panel_rect.collidepoint(event.pos):
                     if numero_box_rect.collidepoint(event.pos):
                         modificando_persone = True
                         input_numero_persone = str(numero_persone)
@@ -1022,6 +1140,12 @@ def main():
                         trascinando_definizione_ellissoidi = True
                         rel = (event.pos[0] - slider_definizione_rect.x) / slider_definizione_rect.width
                         definizione_ellissoidi = SOTTOCELLE_PER_LATO_MIN + max(0, min(1, rel)) * (SOTTOCELLE_PER_LATO_MAX - SOTTOCELLE_PER_LATO_MIN)
+                    elif slider_planimetria_rect.inflate(0, 20).collidepoint(event.pos):
+                        trascinando_alpha_planimetria = True
+                        rel = (event.pos[0] - slider_planimetria_rect.x) / slider_planimetria_rect.width
+                        alpha_planimetria = ALPHA_PLANIMETRIA_MIN + max(0, min(1, rel)) * (ALPHA_PLANIMETRIA_MAX - ALPHA_PLANIMETRIA_MIN)
+                    elif checkbox_planimetria_rect.collidepoint(event.pos):
+                        planimetria_visibile = not planimetria_visibile
                     elif checkbox_sicurezza_rect.collidepoint(event.pos):
                         sicurezza_attiva = not sicurezza_attiva
                     elif checkbox_lidar_rect.collidepoint(event.pos):
@@ -1046,6 +1170,12 @@ def main():
                             "ellissoidi_attivi": ellissoidi_attivi, "ai_attiva": ai_attiva,
                             "controllo_velocita_attivo": controllo_velocita_attivo,
                             "griglia_fine_attiva": griglia_fine_attiva,
+                            "planimetria_visibile": planimetria_visibile,
+                            "alpha_planimetria": alpha_planimetria,
+                            "scala_planimetria_x": scala_planimetria_x,
+                            "scala_planimetria_y": scala_planimetria_y,
+                            "offset_planimetria_x": offset_planimetria_x,
+                            "offset_planimetria_y": offset_planimetria_y,
                         }, FILE_CONFIGURAZIONE_PANNELLO)
                         configurazione_messaggio = ("Configurazione salvata", VERDE)
                         configurazione_salvataggio_timer = 90
@@ -1072,6 +1202,12 @@ def main():
                             ai_attiva = configurazione_da_caricare.get("ai_attiva", ai_attiva)
                             controllo_velocita_attivo = configurazione_da_caricare.get("controllo_velocita_attivo", controllo_velocita_attivo)
                             griglia_fine_attiva = configurazione_da_caricare.get("griglia_fine_attiva", griglia_fine_attiva)
+                            planimetria_visibile = configurazione_da_caricare.get("planimetria_visibile", planimetria_visibile)
+                            alpha_planimetria = configurazione_da_caricare.get("alpha_planimetria", alpha_planimetria)
+                            scala_planimetria_x = configurazione_da_caricare.get("scala_planimetria_x", scala_planimetria_x)
+                            scala_planimetria_y = configurazione_da_caricare.get("scala_planimetria_y", scala_planimetria_y)
+                            offset_planimetria_x = configurazione_da_caricare.get("offset_planimetria_x", offset_planimetria_x)
+                            offset_planimetria_y = configurazione_da_caricare.get("offset_planimetria_y", offset_planimetria_y)
                             configurazione_messaggio = ("Configurazione caricata", VERDE)
                         else:
                             configurazione_messaggio = ("Nessuna configurazione salvata", ROSSO)
@@ -1090,6 +1226,11 @@ def main():
                         definizione_ellissoidi = SOTTOCELLE_PER_LATO_DEFAULT
                         sicurezza_attiva = lidar_attivo = ellissoidi_attivi = ai_attiva = controllo_velocita_attivo = True
                         griglia_fine_attiva = GRIGLIA_FINE_DEFAULT
+                        planimetria_visibile = True
+                        alpha_planimetria = ALPHA_PLANIMETRIA_DEFAULT
+                        scala_planimetria_x = scala_planimetria_y = 1.0
+                        offset_planimetria_x = offset_planimetria_y = 0.0
+                        planimetria_chiave_scalata = None
                         configurazione_messaggio = ("Configurazione ripristinata", VERDE)
                         configurazione_salvataggio_timer = 90
                 elif event.button == 4: zoom *= 1.1 # Zoom In
@@ -1114,6 +1255,7 @@ def main():
                     trascinando_raggio_lidar = False
                     trascinando_raggio_persona = False
                     trascinando_definizione_ellissoidi = False
+                    trascinando_alpha_planimetria = False
 
             if event.type == pygame.MOUSEMOTION:
                 if trascinando_slider:
@@ -1139,6 +1281,10 @@ def main():
                 if trascinando_definizione_ellissoidi:
                     rel = (event.pos[0] - slider_definizione_rect.x) / slider_definizione_rect.width
                     definizione_ellissoidi = SOTTOCELLE_PER_LATO_MIN + max(0, min(1, rel)) * (SOTTOCELLE_PER_LATO_MAX - SOTTOCELLE_PER_LATO_MIN)
+                    continue
+                if trascinando_alpha_planimetria:
+                    rel = (event.pos[0] - slider_planimetria_rect.x) / slider_planimetria_rect.width
+                    alpha_planimetria = ALPHA_PLANIMETRIA_MIN + max(0, min(1, rel)) * (ALPHA_PLANIMETRIA_MAX - ALPHA_PLANIMETRIA_MIN)
                     continue
 
                 # Gestione Panning
@@ -1176,7 +1322,9 @@ def main():
                 if chiedendo_password:
                     if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
                         if input_password == PASSWORD_SALVATAGGIO:
-                            salva_mappa(griglia, FILE_MAPPA_SLOT[slot_da_salvare])
+                            # tutti gli slot registrano le dimensioni: al caricamento e' cosi' possibile
+                            # riconoscere su quale griglia e' nata la mappa e adeguarsi
+                            salva_mappa(griglia, FILE_MAPPA_SLOT[slot_da_salvare], con_dimensioni=True)
                             chiedendo_password = False
                         else:
                             errore_timer = 90
@@ -1193,6 +1341,7 @@ def main():
                         pygame.K_1: 0, pygame.K_KP1: 0,
                         pygame.K_2: 1, pygame.K_KP2: 1,
                         pygame.K_3: 2, pygame.K_KP3: 2,
+                        pygame.K_p: SLOT_MAPPA_POVO,
                     }.get(event.key)
                     if indice_slot is not None:
                         if menu_salvataggio_aperto:
@@ -1203,19 +1352,16 @@ def main():
                             input_password = ""
                         else:
                             if os.path.exists(FILE_MAPPA_SLOT[indice_slot]):
-                                if carica_mappa(griglia, FILE_MAPPA_SLOT[indice_slot]):
-                                    muri_modificati = True
-                                    frame_ultima_modifica_muro = contatore_frame
-                                    target_pos, percorso = None, []
-                                    persone = [crea_persona(griglia) for _ in range(numero_persone)]
-                                    corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
-                                    persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
-                                    gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
-                                    # la mappa nuova puo' avere un muro dove stava il robot: lo ricolloca
-                                    r_robot, c_robot = int(robot_y // DIM_NODO), int(robot_x // DIM_NODO)
-                                    if not (0 <= r_robot < Y_TOT and 0 <= c_robot < X_TOT) or griglia[r_robot][c_robot].tipo == "muro":
-                                        nodo_robot = cella_libera_casuale(griglia)
-                                        robot_x, robot_y = nodo_robot.cx, nodo_robot.cy
+                                x_mappa, y_mappa = dimensioni_mappa(FILE_MAPPA_SLOT[indice_slot])
+                                if (x_mappa, y_mappa) in DIMENSIONI_GRIGLIA_NOTE:
+                                    # e' la griglia ad adeguarsi alla mappa scelta, non il contrario:
+                                    # caricarla sulla griglia sbagliata sposterebbe i muri
+                                    modalita_povo_richiesta = (x_mappa, y_mappa) == (X_TOT_POVO, Y_TOT_POVO)
+                                    mappa_da_caricare = FILE_MAPPA_SLOT[indice_slot]
+                                else:
+                                    messaggio_mappa_testo = (
+                                        f"Mappa {x_mappa}x{y_mappa}: nessuna griglia di questa misura", ROSSO)
+                                    messaggio_mappa_timer = 180
                                 menu_caricamento_aperto = False
                             else:
                                 slot_vuoto_timer = 90  # slot senza mappa salvata: lampeggia un avviso, il menu resta aperto
@@ -1308,6 +1454,28 @@ def main():
                 if event.key == pygame.K_F9:
                     menu_caricamento_aperto = True
 
+                # P: alterna fra griglia standard e griglia della planimetria di Povo. La commutazione
+                # vera avviene fuori dalla gestione eventi, nel blocco unico dopo il ciclo
+                if event.key == pygame.K_p:
+                    modalita_povo_richiesta = not modalita_povo_richiesta
+
+                # allineamento fine della planimetria: frecce spostano, PagSu/PagGiu scalano in modo uniforme
+                if modalita_povo and planimetria_originale is not None:
+                    if event.key == pygame.K_LEFT:
+                        offset_planimetria_x -= PASSO_OFFSET_PLANIMETRIA_PX
+                    elif event.key == pygame.K_RIGHT:
+                        offset_planimetria_x += PASSO_OFFSET_PLANIMETRIA_PX
+                    elif event.key == pygame.K_UP:
+                        offset_planimetria_y -= PASSO_OFFSET_PLANIMETRIA_PX
+                    elif event.key == pygame.K_DOWN:
+                        offset_planimetria_y += PASSO_OFFSET_PLANIMETRIA_PX
+                    elif event.key == pygame.K_PAGEUP:
+                        scala_planimetria_x = min(SCALA_PLANIMETRIA_MAX, scala_planimetria_x + PASSO_SCALA_PLANIMETRIA)
+                        scala_planimetria_y = min(SCALA_PLANIMETRIA_MAX, scala_planimetria_y + PASSO_SCALA_PLANIMETRIA)
+                    elif event.key == pygame.K_PAGEDOWN:
+                        scala_planimetria_x = max(SCALA_PLANIMETRIA_MIN, scala_planimetria_x - PASSO_SCALA_PLANIMETRIA)
+                        scala_planimetria_y = max(SCALA_PLANIMETRIA_MIN, scala_planimetria_y - PASSO_SCALA_PLANIMETRIA)
+
                 if event.key == pygame.K_t:
                     path_salvata = salva_mappa_training(griglia)
                     messaggio_mappa_training_testo = f"Mappa training salvata: {os.path.basename(path_salvata)}"
@@ -1328,6 +1496,68 @@ def main():
 
             if event.type == pygame.KEYUP and event.key == pygame.K_w:
                 ultima_cella_w = None
+
+        # commutazione della griglia, in un punto solo: la chiedono sia il tasto P sia la scelta di una
+        # mappa nata sull'altra griglia. Cambiando le dimensioni globali va rifatto tutto cio' che le ha
+        # gia' incorporate, a partire dai worker del pool, che ne tengono una copia propria
+        if modalita_povo_richiesta != modalita_povo:
+            modalita_povo = modalita_povo_richiesta
+            if modalita_povo:
+                applica_dimensioni_griglia(X_TOT_POVO, Y_TOT_POVO)
+                planimetria_originale = carica_planimetria()
+            else:
+                applica_dimensioni_griglia(X_TOT_STANDARD, Y_TOT_STANDARD)
+                planimetria_originale = planimetria_scalata = None
+            planimetria_chiave_scalata = None
+
+            griglia = [[Nodo(r, c) for c in range(X_TOT)] for r in range(Y_TOT)]
+            crea_bordi(griglia)
+            griglia_robot_da_ricostruire = True
+            pool_persone.terminate()
+            pool_persone = _crea_pool_persone(griglia)
+            richiesta_percorsi_pendente = None
+            persone_richiesta_percorsi_pendente = []
+            muri_modificati = False
+            robot_x, robot_y = 1.5 * DIM_NODO, 1.5 * DIM_NODO
+            rigenera_popolazione = True
+            messaggio_mappa_testo = (
+                f"Modalita' Povo: griglia {X_TOT}x{Y_TOT}" if modalita_povo else f"Griglia standard {X_TOT}x{Y_TOT}", VERDE)
+            messaggio_mappa_timer = 120
+
+        # caricamento differito: arriva qui dopo l'eventuale cambio di griglia, cosi' i muri finiscono
+        # sempre sulla griglia della misura per cui la mappa era stata salvata
+        if mappa_da_caricare is not None:
+            if carica_mappa(griglia, mappa_da_caricare):
+                muri_modificati = True
+                frame_ultima_modifica_muro = contatore_frame
+                rigenera_popolazione = True
+                messaggio_mappa_testo = (f"Mappa caricata: {os.path.basename(mappa_da_caricare)} ({X_TOT}x{Y_TOT})", VERDE)
+                messaggio_mappa_timer = 120
+            mappa_da_caricare = None
+
+        # ripopolamento, comune al cambio di griglia e al caricamento di una mappa: le posizioni vecchie
+        # non hanno piu' senso, e le stime del lidar si riferiscono alla mappa precedente
+        if rigenera_popolazione:
+            rigenera_popolazione = False
+            target_pos, percorso = None, []
+            frame_inizio_target = None
+            persone = [crea_persona(griglia) for _ in range(numero_persone)]
+            corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
+            persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
+            gruppi = [crea_gruppo(griglia) for _ in range(numero_gruppi)]
+            celle_rilevate_precedenti = set()
+            tracciamento_lidar = {}
+            storico_posizioni_lidar = {}
+            mappa_pesi_render = {}
+            mappa_costo_probabilita = {}
+            modalita_rettangolo = False
+            primo_punto_rettangolo = None
+            ultima_cella_w = None
+            # la mappa nuova puo' avere un muro dove stava il robot: lo ricolloca
+            r_robot, c_robot = int(robot_y // DIM_NODO), int(robot_x // DIM_NODO)
+            if not (0 <= r_robot < Y_TOT and 0 <= c_robot < X_TOT) or griglia[r_robot][c_robot].tipo == "muro":
+                nodo_robot = cella_libera_casuale(griglia)
+                robot_x, robot_y = nodo_robot.cx, nodo_robot.cy
 
         zoom, offset_x, offset_y = limita_zoom_pan(zoom, offset_x, offset_y, screen.get_width(), screen.get_height())
 
@@ -1795,6 +2025,11 @@ def main():
             msg_txt = font.render(messaggio_mappa_training_testo, True, VERDE)
             screen.blit(msg_txt, (10, 40))
 
+        if messaggio_mappa_timer > 0:
+            messaggio_mappa_timer -= 1
+            testo_mappa, colore_mappa = messaggio_mappa_testo
+            screen.blit(font.render(testo_mappa, True, colore_mappa), (10, 70))
+
         if messaggio_arrivo_timer > 0:
             messaggio_arrivo_timer -= 1
             arrivo_txt = font_grande.render(messaggio_arrivo_testo, True, VERDE)
@@ -1825,7 +2060,10 @@ def main():
         if slot_vuoto_timer > 0:
             slot_vuoto_timer -= 1
         if menu_salvataggio_aperto or menu_caricamento_aperto:
-            box_slot_w, box_slot_h = 360, 210
+            # tutti gli slot, con la misura della griglia a cui appartengono: caricandone uno dell'altra
+            # modalita' e' la griglia ad adeguarsi, quindi non c'e' motivo di nasconderli
+            slot_visibili = [(i, str(i + 1)) for i in range(SLOT_MAPPA_POVO)] + [(SLOT_MAPPA_POVO, "P")]
+            box_slot_w, box_slot_h = 430, 90 + 40 * len(slot_visibili)
             box_slot_x = (screen.get_width() - box_slot_w) // 2
             box_slot_y = (screen.get_height() - box_slot_h) // 2
             pygame.draw.rect(screen, BIANCO, (box_slot_x, box_slot_y, box_slot_w, box_slot_h))
@@ -1834,10 +2072,17 @@ def main():
             titolo_slot = font.render("Esc annulla", True, NERO)
             screen.blit(titolo_slot, (box_slot_x + 15, box_slot_y + 15))
 
-            for i, path in enumerate(FILE_MAPPA_SLOT):
-                stato = "occupato" if os.path.exists(path) else "vuoto"
-                riga_slot = font.render(f"{i + 1}. {os.path.basename(path)} - {stato}", True, NERO)
-                screen.blit(riga_slot, (box_slot_x + 15, box_slot_y + 55 + i * 40))
+            for riga, (indice_slot_mostrato, tasto_slot) in enumerate(slot_visibili):
+                path = FILE_MAPPA_SLOT[indice_slot_mostrato]
+                if os.path.exists(path):
+                    x_mappa, y_mappa = dimensioni_mappa(path)
+                    stato = f"{x_mappa}x{y_mappa}"
+                    # la griglia corrente si distingue in nero, l'altra in grigio: caricandola si cambia
+                    colore_slot = NERO if (x_mappa, y_mappa) == (X_TOT, Y_TOT) else GRIGIO_SCURO
+                else:
+                    stato, colore_slot = "vuoto", GRIGIO_SCURO
+                riga_slot = font.render(f"{tasto_slot}. {os.path.basename(path)} - {stato}", True, colore_slot)
+                screen.blit(riga_slot, (box_slot_x + 15, box_slot_y + 55 + riga * 40))
 
             if menu_caricamento_aperto and slot_vuoto_timer > 0:
                 avviso_slot = font.render("Slot vuoto: nessuna mappa da caricare", True, ROSSO)
@@ -1847,6 +2092,16 @@ def main():
         if pannello_aperto:
             pygame.draw.rect(screen, BIANCO, panel_rect)
             pygame.draw.rect(screen, NERO, panel_rect, 2)
+
+            # indicatore di scorrimento sul bordo destro, solo se il pannello eccede la finestra: sta in
+            # coordinate schermo e non del pannello, perche' rappresenta la parte visibile
+            if scroll_pannello_max > 0:
+                barra_x = panel_rect.x + panel_w - 8
+                barra_y, barra_h = 20, screen.get_height() - 40
+                pygame.draw.rect(screen, GRIGIO, (barra_x, barra_y, 4, barra_h))
+                cursore_h = max(20, int(barra_h * barra_h / panel_h))
+                cursore_y = barra_y + int((barra_h - cursore_h) * scroll_pannello / scroll_pannello_max)
+                pygame.draw.rect(screen, GRIGIO_SCURO, (barra_x, cursore_y, 4, cursore_h))
 
             titolo = font.render("Pannello tecnico (TAB)", True, NERO)
             screen.blit(titolo, (panel_rect.x + 15, panel_rect.y + 10))
@@ -1959,6 +2214,24 @@ def main():
             screen.blit(griglia_fine_txt, (panel_rect.x + 15, panel_rect.y + 684))
             pygame.draw.rect(screen, VERDE if griglia_fine_attiva else BIANCO, checkbox_griglia_fine_rect)
             pygame.draw.rect(screen, NERO, checkbox_griglia_fine_rect, 2)
+
+            # planimetria: trasparenza e allineamento, attivi solo in modalita' Povo (tasto P)
+            planimetria_caricata = modalita_povo and planimetria_originale is not None
+            planimetria_label = f"Planimetria: {int(alpha_planimetria)}" if planimetria_caricata else "Planimetria (P per la mappa Povo)"
+            planimetria_txt = font.render(planimetria_label, True, NERO if planimetria_caricata else GRIGIO_SCURO)
+            screen.blit(planimetria_txt, (panel_rect.x + 15, panel_rect.y + 721))
+            pygame.draw.rect(screen, ARANCIONE if (planimetria_visibile and planimetria_caricata) else BIANCO, checkbox_planimetria_rect)
+            pygame.draw.rect(screen, NERO, checkbox_planimetria_rect, 2)
+
+            pygame.draw.rect(screen, GRIGIO, slider_planimetria_rect)
+            rel_planimetria = (alpha_planimetria - ALPHA_PLANIMETRIA_MIN) / (ALPHA_PLANIMETRIA_MAX - ALPHA_PLANIMETRIA_MIN)
+            handle_planimetria_x = slider_planimetria_rect.x + int(rel_planimetria * slider_planimetria_rect.width)
+            pygame.draw.circle(screen, ARANCIONE, (handle_planimetria_x, slider_planimetria_rect.centery), 9)
+
+            allineamento_txt = font_piccolo.render(
+                f"scala {scala_planimetria_x:.2f}x{scala_planimetria_y:.2f}  offset {int(offset_planimetria_x)},{int(offset_planimetria_y)} px"
+                "  (frecce / PagSu-PagGiu)", True, GRIGIO_SCURO)
+            screen.blit(allineamento_txt, (panel_rect.x + 15, panel_rect.y + 770))
 
             # pulsanti che salvano, ricaricano o azzerano su disco la configurazione del pannello
             pygame.draw.rect(screen, VERDE, button_salva_config_rect)
