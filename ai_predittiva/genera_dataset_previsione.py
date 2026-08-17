@@ -76,6 +76,28 @@ MIX_SPECIALIZZATO = {
     "moltiplicatore_gruppi": 1.0,
 }
 
+# --- VARIANTE POVO della modalita' specializzata (flag --povo) ---
+# I valori qui sopra sono quelli con cui e' stato allenato il modello impiegato nelle campagne, e
+# non vanno cambiati: testing.py importa POPOLAZIONE_MIN/MAX/PASSO da questo modulo e li usa per
+# scandire i livelli di popolazione delle misure. La variante seguente e' servita a generare
+# dataset_previsione_povo_5x.npz, il dataset di validazione sulla planimetria reale da cui viene
+# la riduzione del 12,5% riportata in tesi: e' un dataset diverso, non un rimpiazzo, e le due
+# tarature convivono perche' entrambi i file devono restare rigenerabili.
+#
+# Qui il tetto di popolazione non e' scelto a giudizio ma ricavato dalla norma: il D.M. 26 agosto
+# 1992 sulla prevenzione incendi nell'edilizia scolastica fissa in 26 persone l'affollamento
+# massimo di un'aula, e il piano ricalcato dalla planimetria ne conta 25 - dunque 650 persone. Si
+# campiona fino a 750 per restare dentro il supporto anche oltre il picco normativo, invece di
+# estrapolare proprio dove il robot lavorerebbe peggio.
+#
+# La quota di persone ferme sale dal 30,1% al 33,8% perche' quel 650 conta l'affollamento delle
+# AULE: la maggior parte di quelle persone sta seduta e per il robot e' a tutti gli effetti ferma.
+# Le altre tre classi si spartiscono il resto mantenendo invariati i rapporti fra loro.
+MAPPA_POVO = "povo"
+POPOLAZIONE_MAX_POVO = 750
+POPOLAZIONE_PASSO_POVO = 100
+QUOTE_POVO = (0.201, 0.168, 0.338, 0.293)  # normali / corridori / ferme / gruppi
+
 
 def popolazione_da_totale(totale):
     """Conteggi assoluti (persone/corridori/ferme/gruppi) per una folla di 'totale' individui con le quote
@@ -95,10 +117,7 @@ MEMBRI_MEDI_PER_GRUPPO = sim.GRUPPO_MEMBRI_MEDIA
 def _fattore_area(nome_mappa):
     """Rapporto fra l'area libera della mappa e CELLE_LIBERE_RIFERIMENTO: e' lo stesso fattore con cui
     costruisci_scenario scala i budget, quindi va invertito qui per centrare una popolazione ASSOLUTA."""
-    griglia = [[sim.Nodo(r, c) for c in range(sim.X_TOT)] for r in range(sim.Y_TOT)]
-    sim.crea_bordi(griglia)
-    costruttore = ts.MAPPE.get(nome_mappa) or ts.MAPPE_TEST.get(nome_mappa)
-    costruttore(griglia)
+    griglia = ts.costruisci_griglia(nome_mappa)
     celle_libere = sum(1 for riga in griglia for n in riga if n.tipo == "libero")
     return celle_libere / ts.CELLE_LIBERE_RIFERIMENTO
 
@@ -445,12 +464,26 @@ if __name__ == "__main__":
         # popolazione a cui il robot verra' poi provato: niente varieta' di mappe (scelta consapevole -
         # il modello che ne esce vale per QUELL'ambiente, non e' una prova di generalizzazione ma una
         # specializzazione sul luogo di installazione), tanti scenari ripetuti con seed diversi al posto suo.
+        #
+        # Con --povo si passa alla taratura descritta poco sopra: cambiano ambiente, tetto di
+        # popolazione e quote della folla, e il dataset finisce in un file dal nome distinto cosi'
+        # da non sovrascrivere quello di addestramento.
+        if "--povo" in sys.argv:
+            MAPPA_SPECIALIZZATO = MAPPA_POVO
+            POPOLAZIONE_MAX, POPOLAZIONE_PASSO = POPOLAZIONE_MAX_POVO, POPOLAZIONE_PASSO_POVO
+            QUOTA_NORMALI, QUOTA_CORRIDORI, QUOTA_FERME, QUOTA_GRUPPI = QUOTE_POVO
+            MIX_SPECIALIZZATO = {
+                "prop_normali": QUOTA_NORMALI, "prop_corridori": QUOTA_CORRIDORI,
+                "prop_ferme": QUOTA_FERME, "moltiplicatore_gruppi": 1.0,
+            }
+            file_output = f"dataset_previsione_{MAPPA_SPECIALIZZATO}_{ACCELERAZIONE}x.npz"
+        else:
+            file_output = f"dataset_previsione_specializzato_{ACCELERAZIONE}x.npz"
         fattore = _fattore_area(MAPPA_SPECIALIZZATO)
         popolazioni = list(range(POPOLAZIONE_MIN, POPOLAZIONE_MAX + 1, POPOLAZIONE_PASSO))
         densita_livelli = [(f"pop{p}", _densita_per_popolazione(p, fattore)) for p in popolazioni]
         mix_livelli = [("specializzato", MIX_SPECIALIZZATO)]
         num_frame = FRAME_PER_SCENARIO["completo"]
-        file_output = f"dataset_previsione_specializzato_{ACCELERAZIONE}x.npz"
         print(f"Modalita' specializzata su {MAPPA_SPECIALIZZATO} (area libera {fattore:.2f}x il riferimento)")
         print(f"Popolazione da {POPOLAZIONE_MIN} a {POPOLAZIONE_MAX} a passi di {POPOLAZIONE_PASSO} "
               f"({len(popolazioni)} livelli) x {RIPETIZIONI_SPECIALIZZATO} ripetizioni, accelerazione {ACCELERAZIONE}x")

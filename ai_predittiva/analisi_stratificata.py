@@ -19,7 +19,9 @@ import os
 import sys
 import numpy as np
 import torch
-from allena_previsione import CorrezioneKalman, prepara_input, carica_dataset, FILE_MODELLO, CARTELLA_DATASET
+from allena_previsione import (CorrezioneKalman, prepara_input, carica_dataset, FILE_MODELLO,
+                               FILE_MODELLO_SPECIALIZZATO, CARTELLA_DATASET,
+                               DIMENSIONE_NASCOSTA, DIMENSIONE_NASCOSTA_SPECIALIZZATO)
 
 # mappe raggruppate per tipo strutturale: lo sweep di densita' (verifica_densita_massima.py) ha gia' mostrato
 # che i colli di bottiglia (porta_stretta/doppia_porta/corridoio) saturano molto prima delle mappe aperte o
@@ -42,15 +44,26 @@ def _tipo_mappa(nome_mappa):
     return TIPO_MAPPA.get(nome_mappa, "altro")
 
 
-def carica_e_correggi(path_dataset):
+def carica_e_correggi(path_dataset, specializzato=False):
     """Carica il dataset e fa girare il modello gia' allenato su OGNI campione (nessun training qui, solo
-    inferenza) per avere, per ciascuno, sia l'errore del solo Kalman sia quello di Kalman+AI da confrontare."""
+    inferenza) per avere, per ciascuno, sia l'errore del solo Kalman sia quello di Kalman+AI da confrontare.
+
+    'specializzato' sceglie il modello grande, quello che testing.py carica quando ACCELERAZIONE > 1: e'
+    l'unico confronto lecito con le campagne sui tempi, che girano tutte a passo accelerato. Con il modello
+    base i numeri di previsione non corrisponderebbero al robot effettivamente misurato."""
     storico, pred_kalman, verita, scenario = carica_dataset(path_dataset)
-    mappe, densita, mix = (np.array(v) for v in zip(*(s.split("|") for s in scenario)))
+    # i dataset vecchi hanno 'mappa|densita|mix', quelli generati per Povo aggiungono la ripetizione
+    # ('povo|pop50|specializzato|r1'): si leggono i primi tre campi e si ignora il resto
+    campi = [s.split("|") for s in scenario]
+    mappe = np.array([c[0] for c in campi])
+    densita = np.array([c[1] for c in campi])
+    mix = np.array([c[2] for c in campi])
     tipi_mappa = np.array([_tipo_mappa(m) for m in mappe])
 
-    modello = CorrezioneKalman()
-    modello.load_state_dict(torch.load(FILE_MODELLO, map_location="cpu"))
+    path_modello = FILE_MODELLO_SPECIALIZZATO if specializzato else FILE_MODELLO
+    dimensione = DIMENSIONE_NASCOSTA_SPECIALIZZATO if specializzato else DIMENSIONE_NASCOSTA
+    modello = CorrezioneKalman(dimensione_nascosta=dimensione)
+    modello.load_state_dict(torch.load(path_modello, map_location="cpu"))
     modello.eval()
     with torch.no_grad():
         correzione = modello(torch.from_numpy(prepara_input(storico))).numpy()
@@ -82,9 +95,10 @@ def _stampa_gruppo(titolo, chiavi, err_kalman, err_ai, n_minimo=20):
         print(f"({scartate} valori scartati per meno di {n_minimo} campioni)")
 
 
-def main(path_dataset):
-    print(f"Carico dataset e modello: {path_dataset}")
-    err_kalman, err_ai, mappe, densita, mix, tipi_mappa = carica_e_correggi(path_dataset)
+def main(path_dataset, specializzato=False):
+    print(f"Carico dataset e modello: {path_dataset}"
+          f" ({'modello specializzato' if specializzato else 'modello base'})")
+    err_kalman, err_ai, mappe, densita, mix, tipi_mappa = carica_e_correggi(path_dataset, specializzato)
     print(f"{len(err_kalman)} campioni totali (intero dataset, non solo il test set - vedi nota in testa al file)")
     print(f"Miglioramento medio complessivo: {(1 - err_ai.mean() / err_kalman.mean()) * 100:.1f}%")
 
@@ -99,5 +113,6 @@ def main(path_dataset):
 
 
 if __name__ == "__main__":
-    path_dataset = sys.argv[1] if len(sys.argv) > 1 else os.path.join(CARTELLA_DATASET, "dataset_previsione.npz")
-    main(path_dataset)
+    argomenti = [a for a in sys.argv[1:] if a != "--specializzato"]
+    path_dataset = argomenti[0] if argomenti else os.path.join(CARTELLA_DATASET, "dataset_previsione.npz")
+    main(path_dataset, specializzato="--specializzato" in sys.argv)

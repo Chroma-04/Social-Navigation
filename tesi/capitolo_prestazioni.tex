@@ -1,0 +1,329 @@
+% Capitolo sulle prestazioni dell'ibridazione.
+% Riscrittura del capitolo "Prestazioni e limiti dell'apprendimento": l'impianto passa da
+% "verificare se l'ibridazione migliora i tempi" a "caratterizzare l'insieme delle grandezze
+% che l'ibridazione modifica, e derivarne un criterio di decisione".
+% Da aggiungere: condizioni al contorno, meccanismo, confronto con la letteratura, conclusioni.
+
+\section{Prestazioni e limiti dell'ibridazione}
+
+Il capitolo precedente ha stabilito che la correzione appresa migliora la previsione del
+moto in modo misurabile. Resta da verificare ciò che davvero interessa: se il sistema, nel
+suo complesso, ne tragga un beneficio osservabile. Le due domande non coincidono, perché
+fra la previsione e il comportamento del robot si interpongono la costruzione della mappa
+di costo, la ricerca del percorso e la dinamica del moto, e ciascuno di questi passaggi
+può assorbire il guadagno prima che si traduca in azione.
+
+Questa verifica non è un adempimento formale: è il criterio con cui si decide. Per chi
+gestisce un sistema robotico già funzionante, aggiungere una componente appresa è un
+investimento --- sviluppo, raccolta e mantenimento dei dati, capacità di calcolo a bordo
+--- e ha senso soltanto a fronte di un ritorno misurabile. Un modello più accurato che non
+modifichi il comportamento del sistema non giustifica quella spesa, per quanto accurato
+sia; ed è precisamente per questo che il miglioramento della previsione, da solo, non
+costituisce una risposta.
+
+
+\subsection{Le variabili in gioco}
+
+Formulare la questione come \emph{se l'ibridazione funzioni} è tuttavia mal posto, perché
+presuppone che il sistema possieda un'unica dimensione di prestazione. Non è così.
+L'introduzione di una componente predittiva appresa agisce simultaneamente su un insieme
+di grandezze eterogenee, che non si muovono nella stessa direzione e che è necessario
+rilevare separatamente.
+
+\paragraph{Accuratezza della previsione.} È la grandezza direttamente ottimizzata
+dall'addestramento, e l'unica su cui un miglioramento è atteso per costruzione. Si misura
+come distanza fra la posizione prevista e quella effettivamente occupata dal pedone allo
+scadere dell'orizzonte di previsione. È una grandezza \emph{interna}: descrive la qualità
+di una stima intermedia, non un comportamento osservabile del robot.
+
+\paragraph{Tempo di percorrenza.} È il tempo impiegato a completare un tragitto assegnato,
+e costituisce la grandezza operativa per eccellenza: determina quanti incarichi il robot
+porta a termine in un turno, e con essa il ritorno economico del sistema. A differenza
+della precedente è una grandezza \emph{esterna}, che descrive ciò che il robot fa e non
+ciò che il robot crede.
+
+\paragraph{Tempo trascorso in arresto.} Scompone la precedente e distingue due modi
+opposti di perdere tempo: fermarsi davanti a un ostacolo mobile, oppure aggirarlo
+percorrendo una rotta più lunga. Senza questa scomposizione i due meccanismi risultano
+indistinguibili, e poiché agiscono in direzioni opposte possono compensarsi lasciando il
+tempo totale invariato pur avendo modificato profondamente il comportamento.
+
+\paragraph{Tasso di completamento.} La frazione di esecuzioni in cui il robot raggiunge la
+meta entro un limite prefissato. Un sistema che riduca il tempo medio ma fallisca più
+spesso non costituisce un miglioramento, e la sola media dei tempi non lo rivelerebbe.
+
+\paragraph{Margine spaziale rispetto alle persone.} La distanza mantenuta dai pedoni
+durante il transito, rilevabile come minimo assoluto, come media dei minimi istantanei, o
+come frazione di tempo trascorsa entro una soglia di prossimità. È l'indicatore prossemico
+del comfort di chi condivide l'ambiente con il robot: un robot che sfiori le persone
+compie il proprio incarico, ma degrada la qualità dello spazio in cui opera.
+
+\paragraph{Fluidità del moto.} Misurabile attraverso le derivate superiori della
+traiettoria, in particolare il \emph{jerk}, cioè la derivata terza della posizione.
+Concorre alla leggibilità del comportamento: una traiettoria regolare consente ai pedoni
+di prevedere le intenzioni del robot e di coordinarsi con esso, mentre un moto a scatti
+induce esitazione e manovre reciproche inefficienti.
+
+\paragraph{Costo computazionale.} La capacità di calcolo richiesta a bordo per l'inferenza
+del modello e per il mantenimento delle strutture che ne consumano l'uscita. Nei sistemi
+embedded questa risorsa compete con le altre funzioni del robot, e un modello che
+richiedesse una frequenza di pianificazione inferiore potrebbe peggiorare le prestazioni
+proprio in virtù della propria accuratezza. Questa grandezza non è quantificata nel
+presente lavoro, ed è dichiarata qui fra le variabili in gioco perché la sua omissione
+costituisce un limite noto dell'analisi e non una sua svista.
+
+\bigskip
+
+Queste grandezze sono in parte accoppiate, e l'accoppiamento non è casuale. Un robot che
+mantenga margini più ampi percorre necessariamente traiettorie più lunghe; un robot che
+anticipi i conflitti rallentando li evita ma paga il rallentamento in tempo; un robot che
+ricalcoli il percorso con maggiore frequenza reagisce meglio ma consuma più calcolo. Il
+guadagno di accuratezza, quando si propaga fino al comportamento, non si aggiunge dunque
+al sistema come un beneficio netto: si distribuisce fra dimensioni che si contendono lo
+stesso bilancio, e la forma di tale distribuzione dipende da come il pianificatore consuma
+la previsione. La letteratura sulla navigazione in ambienti affollati documenta con
+regolarità questo esito: l'integrazione di predittori appresi entro controllori predittivi
+produce margini di sicurezza più ampi e movimento più regolare, a fronte di tempi di
+percorrenza sensibilmente più lunghi \cite{aslam2025mpc}. Il guadagno non scompare, cambia
+di natura.
+
+Ne discende un'osservazione che orienta l'intero capitolo. Un lavoro che riporti soltanto
+il miglioramento di accuratezza non consente di stabilire dove quel guadagno sia finito;
+uno che riporti soltanto i tempi non consente di stabilire se sia stato speso altrove. La
+caratterizzazione richiede l'insieme, ed è per questo che la misura descritta nel seguito
+rileva tutte le grandezze elencate, comprese quelle sulle quali non si osserva alcuna
+variazione: anche l'assenza di effetto su una dimensione è un'informazione sulla
+distribuzione del guadagno.
+
+
+\subsection{Il criterio di valutazione dipende dall'obiettivo}
+
+Ne segue che la convenienza dell'ibridazione non è una proprietà del modello, ma una
+relazione fra il modello e gli obiettivi assegnati al sistema. Un robot di servizio
+logistico, valutato sul numero di consegne per turno, considera il tempo di percorrenza la
+grandezza dominante, e un'ibridazione che lo peggiori del quindici per cento per guadagnare
+margine costituisce per esso una perdita netta, quale che sia l'accuratezza raggiunta. Un
+robot destinato a un ambiente sanitario o museale, dove la percezione di sicurezza da
+parte delle persone e la prevedibilità del comportamento contano più della rapidità, può
+trovare vantaggioso esattamente il medesimo scambio. La stessa componente, misurata sul
+medesimo sistema, riceve verdetti opposti a seconda della funzione obiettivo adottata.
+
+Questa dipendenza dall'obiettivo è la ragione per cui le metriche di errore comunemente
+impiegate nella valutazione dei predittori non bastano a decidere: esse sono indipendenti
+dal compito, e previsioni giudicate equivalenti possono condurre a esiti profondamente
+diversi nella pianificazione a valle \cite{ivanovic2021rethinking, ivanovic2022injecting}.
+Una valutazione utile alla decisione deve dunque misurare l'intero insieme delle grandezze
+operative, non la sola accuratezza, e dichiarare rispetto a quale obiettivo il bilancio
+viene tratto.
+
+
+\subsection{Natura e finalità di questa analisi}
+
+È opportuno dichiarare a questo punto la finalità del lavoro, poiché essa determina il
+modo in cui i risultati vanno letti. L'obiettivo non è conseguire un sistema di navigazione
+ottimale, né dimostrare che l'ibridazione produca un miglioramento: è caratterizzare in
+modo completo l'effetto dell'aggiunta di una componente appresa a un sistema classico già
+funzionante, rilevandone tanto i vantaggi quanto i costi e i limiti. Si tratta dunque di
+uno studio di natura osservativa, non di un lavoro di ottimizzazione.
+
+Da questa impostazione discendono due conseguenze. La prima riguarda il trattamento del
+sistema di base: pianificatore, filtro di stima e logica di movimento sono mantenuti
+invariati in tutte le misure, e nessun parametro viene ritarato per favorire l'una o
+l'altra condizione. Modificarli renderebbe le differenze osservate non più attribuibili
+alla sola correzione appresa, che è precisamente ciò che l'esperimento intende isolare;
+l'assenza di interventi migliorativi sull'architettura non costituisce quindi una rinuncia,
+ma una condizione necessaria dell'attribuibilità.
+
+La seconda riguarda l'interpretazione degli esiti. In uno studio di ottimizzazione un
+effetto nullo rappresenta un obiettivo mancato; in uno studio di caratterizzazione esso è
+un risultato al pari di ogni altro, purché lo strumento di misura sia in grado di rilevare
+effetti di quell'ordine di grandezza. Ne consegue che la validità delle conclusioni non
+riposa sul segno dei valori ottenuti, bensì sulla dimostrazione della sensibilità del
+protocollo sperimentale --- verifica alla quale è dedicata parte del paragrafo seguente ---
+e sull'ampiezza degli intervalli entro cui gli effetti risultano confinati.
+
+Il capitolo procede pertanto in tre tempi. Si definisce anzitutto un protocollo
+sperimentale che consenta di attribuire alla sola correzione appresa le differenze
+osservate, e se ne verifica la sensibilità invece di assumerla; si misura quindi l'effetto
+dell'ibridazione su ciascuna delle grandezze elencate, distinguendo i risultati stabiliti
+dalle tendenze non confermate; si esaminano infine le condizioni al contorno --- densità
+della folla, portata sensoriale, struttura dell'ambiente, presenza stessa della previsione
+--- per stabilire entro quali limiti le conclusioni si estendano. Ne discende un criterio
+applicabile prima dell'investimento, che costituisce il contributo principale di questo
+lavoro.
+
+
+\subsection{Il sistema misurato}
+
+L'ambiente di prova riproduce il piano secondo di Povo~1, edificio didattico
+dell'Università di Trento, ricalcato sulla planimetria reale. La griglia di
+rappresentazione conta $44 \times 73$ celle di 0,5~m di lato, corrispondenti a un'area di
+$22 \times 36{,}5$~m; delle superfici così descritte 499~m\textsuperscript{2} risultano
+calpestabili su 803~m\textsuperscript{2} lordi. L'ambiente è fortemente articolato:
+l'82\% della superficie libera si trova entro una cella da un muro, e i corridoi hanno
+larghezza tipica di 1,5~m. La scelta non è neutrale e sarà discussa nel seguito: è
+l'ambiente in cui il robot trascorre la maggior frazione di tempo in arresto, e dunque
+quello in cui un miglioramento della previsione dispone del massimo margine per
+manifestarsi.
+
+La popolazione di riferimento conta circa 349 individui compresenti, pari a una densità di
+0,70~persone/m\textsuperscript{2}, ed è composta combinando le categorie comportamentali
+descritte nel capitolo precedente --- pedoni ordinari, pedoni a velocità elevata, persone
+stazionarie e gruppi coesi --- in proporzioni mantenute costanti in tutte le esecuzioni.
+La densità complessiva è ancorata a un riferimento normativo anziché a una stima
+soggettiva: il D.M. 26 agosto 1992 in materia di prevenzione incendi nell'edilizia
+scolastica fissa in 26 persone l'affollamento massimo di un'aula, il che per le 25 aule del
+piano determina un affollamento complessivo di 650 persone, ossia
+1,30~persone/m\textsuperscript{2}. La densità impiegata corrisponde dunque a poco più
+della metà dell'affollamento massimo ammesso, condizione severa ma non estrema. Due
+ulteriori livelli, 0,51 e 0,64~persone/m\textsuperscript{2}, ottenuti riscalando la
+medesima composizione, sono impiegati per verificare la dipendenza dei risultati dalla
+densità.
+
+La geometria del robot e dei pedoni resta quella di esercizio del simulatore: raggio del
+robot 0,095~m, raggio dei pedoni 0,117~m, raggio di arresto di sicurezza 0,168~m, portata
+del telemetro 2,04~m. Il robot pianifica su una griglia di risoluzione doppia rispetto a
+quella dell'ambiente, con celle di 0,25~m, e l'orizzonte di previsione è fissato a un
+secondo.
+
+
+\subsubsection{Protocollo di misura}
+
+Il tragitto assegnato è la traversata diagonale dell'ambiente, dalla cella libera più
+prossima a un angolo a quella più prossima all'angolo opposto: è il percorso più lungo
+disponibile, e quello lungo il quale il robot incontra il maggior numero di conflitti.
+Tragitto e ambiente restano identici in ogni esecuzione; lasciarli variare introdurrebbe
+nel confronto la difficoltà del percorso, sorgente di variabilità molto maggiore
+dell'effetto che si intende osservare.
+
+Ciò che cambia fra le due condizioni è unicamente il robot. Il confronto è
+\emph{appaiato}: ogni ripetizione consiste in due esecuzioni che condividono il medesimo
+seme del generatore pseudocasuale, per cui posizioni iniziali della folla, destinazioni
+assegnate a ciascun pedone e intera sequenza di rumore del sensore coincidono. Si osserva
+quindi la differenza \emph{dentro} ciascuna coppia, anziché lo scarto fra le medie di due
+insiemi indipendenti, che sarebbe dominato dalla variabilità fra scene diverse. Il
+controllo predittivo di velocità rimane disattivato in entrambe le condizioni: è il
+secondo componente introdotto da questo lavoro e viene misurato separatamente, poiché
+accendendolo qui una eventuale differenza non sarebbe più attribuibile alla sola
+correzione appresa.
+
+Il determinismo su cui l'appaiamento si fonda è stato verificato e non assunto. In due
+occasioni distinte, campagne successive hanno ripetuto la condizione di riferimento con
+gli stessi semi già impiegati: i tempi ottenuti coincidono con quelli in archivio in 50
+ripetizioni su 50, con scarto massimo inferiore al centesimo di secondo, indipendentemente
+dal processo che esegue la simulazione e dall'ordine di esecuzione.
+
+Per ciascun confronto si riportano la differenza media fra le condizioni, il suo errore
+standard, il numero di ripetizioni in cui ciascuna condizione ha prevalso e l'intervallo di
+confidenza al 95\%. Il rapporto fra differenza media ed errore standard costituisce il
+criterio di lettura adottato nel seguito: al di sotto dell'unità la differenza non è
+distinguibile da zero, per quanto grande possa apparire la media; al di sopra di due la si
+considera stabilita. Un'esecuzione in cui il robot non raggiunga la meta entro 150 secondi
+equivalenti viene conteggiata come non conclusa e la coppia cui appartiene è scartata per
+intero; nelle campagne qui riportate tale eventualità non si è mai verificata, e il tasso
+di completamento è risultato unitario in entrambe le condizioni.
+
+Va dichiarato un limite dell'appaiamento, specifico al contesto. I due robot muovono da
+una scena identica, ma non appena scelgono percorsi anche di poco diversi scostano persone
+diverse, e da quell'istante le due simulazioni divergono. Il seme comune controlla dunque
+le condizioni iniziali, non l'intera traiettoria, e la riduzione di varianza che
+l'appaiamento garantisce di norma risulta qui sensibilmente minore. È la ragione per cui
+la dispersione fra ripetizioni resta ampia rispetto agli effetti attesi, e per cui il
+numero di ripetizioni diventa il fattore che limita la sensibilità dell'esperimento.
+
+\paragraph{Verifica di sensibilità.} Un esperimento che non rilevi alcun effetto è
+informativo solo se si dimostra capace di rilevarne. A tale scopo la medesima procedura è
+stata applicata a una grandezza il cui effetto è noto e atteso: la densità della folla.
+Confrontando in modo appaiato le esecuzioni a 0,51 e a 0,70~persone/m\textsuperscript{2}
+sui semi comuni, il tempo di percorrenza del robot di riferimento aumenta di 5,12~s con un
+rapporto pari a 5,98, e il tempo trascorso in arresto di 3,88~s con un rapporto pari a
+6,49. Lo stesso protocollo, sulle stesse esecuzioni, attribuisce alla correzione appresa
+un vantaggio di 0,00~s con rapporto 0,00. Il banco di prova rileva dunque effetti reali
+con rapporti compresi fra 3,6 e 6,5, e l'effetto della correzione con rapporti compresi
+fra 0,2 e 0,6: un ordine di grandezza separa le due classi di risultati.
+
+
+\subsubsection{Risultati}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccccc}
+\hline
+densità & ripetizioni & senza corr. & con corr. & differenza & rapporto \\
+\hline
+0,51 pers/m\textsuperscript{2} & 50 & 47,99 s & 48,15 s & $-0{,}16$ s & 0,38 \\
+0,64 pers/m\textsuperscript{2} & 30 & 52,26 s & 51,58 s & $+0{,}68$ s & 0,63 \\
+0,70 pers/m\textsuperscript{2} & 50 & 53,11 s & 53,27 s & $-0{,}16$ s & 0,22 \\
+\hline
+\end{tabular}
+\caption{Tempo di percorrenza, confronto appaiato su tre densità. Valori positivi nella
+colonna delle differenze indicano un vantaggio della correzione. Stima aggregata sulle 130
+ripetizioni: $-0{,}14\%$, intervallo di confidenza al 95\% da $-1{,}46\%$ a $+1{,}17\%$.}
+\label{tab:tempi-densita}
+\end{table}
+
+Il tempo di percorrenza non risulta modificato dalla correzione a nessuna delle tre
+densità esaminate. I rapporti fra differenza media ed errore standard, compresi fra 0,22 e
+0,63, collocano tutti i valori al di sotto della soglia di distinguibilità, e le
+ripetizioni vinte da ciascuna condizione si ripartiscono in misura sostanzialmente
+paritaria: 27 su 50, 17 su 30 e 24 su 50. L'intervallo di confidenza aggregato esclude
+tanto un peggioramento superiore all'1,5\% quanto un miglioramento superiore all'1,2\%.
+
+Il valore isolatamente favorevole della densità intermedia merita una precisazione, poiché
+è l'unico a presentare segno positivo: esso è prodotto da una singola ripetizione anomala,
+rimossa la quale la differenza media si riduce a $-0{,}09$~s. Non costituisce dunque
+indizio di un regime di densità in cui la correzione risulti vantaggiosa.
+
+Anche il tempo trascorso in arresto risulta invariato. Alla densità maggiore esso ammonta
+al 15,8\% del tempo totale, e rappresenta pertanto il margine massimo teoricamente
+recuperabile da una previsione perfetta; la correzione non ne estrae alcuna frazione
+misurabile. Si osservi che, passando da 0,51 a 0,70~persone/m\textsuperscript{2}, tale
+margine cresce del 68\% --- dal 9,4\% al 15,8\% --- senza che il vantaggio della
+correzione ne risulti alterato: l'assenza di effetto non è dunque imputabile a una
+mancanza di margine su cui agire.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\hline
+grandezza & effetto della correzione & stato \\
+\hline
+accuratezza della previsione & $-12{,}5\%$ sull'errore & stabilito \\
+tempo di percorrenza & nessuna variazione & stabilito \\
+tempo trascorso in arresto & nessuna variazione & stabilito \\
+tasso di completamento & invariato (unitario) & stabilito \\
+margine spaziale medio & $+5{,}2\%$ ($\approx 3{,}6$ cm) & tendenza \\
+esposizione alla prossimità & non confermato in replica & non stabilito \\
+fluidità del moto & nessuna variazione & stabilito \\
+costo computazionale & non quantificato & --- \\
+\hline
+\end{tabular}
+\caption{Quadro complessivo delle grandezze rilevate.}
+\label{tab:quadro-grandezze}
+\end{table}
+
+Il margine spaziale mantenuto rispetto ai pedoni in movimento costituisce l'unica
+grandezza comportamentale sulla quale si osservi una variazione di segno definito. Su 80
+ripetizioni appaiate, ripartite in due campagne condotte su semi disgiunti, la distanza
+media dai corpi mobili passa da 0,689 a 0,724~m nella prima e da 0,736 a 0,774~m nella
+seconda, con incremento del 5,2\% in entrambe e rapporto aggregato pari a 1,98. La
+concordanza fra due campioni indipendenti conferisce a questo valore una credibilità
+maggiore di quanto il solo rapporto suggerisca; esso resta tuttavia al limite della soglia
+adottata, e viene pertanto riportato come tendenza e non come risultato stabilito.
+
+Un'ulteriore grandezza di prossimità --- la frazione di tempo trascorsa entro mezzo metro
+da un pedone in movimento --- aveva mostrato nella prima campagna una riduzione del 6,5\%
+con rapporto 2,35. L'ipotesi è stata sottoposta a replica su 50 semi disgiunti dai
+precedenti, fissandola in anticipo come unica ipotesi da verificare: la riduzione si è
+ridotta al 2,9\% con rapporto 1,07. L'effetto non è dunque confermato e non viene
+riportato fra i risultati. Se ne dà conto perché l'episodio illustra il rischio insito
+nell'osservazione simultanea di più grandezze, e perché la replica su campioni disgiunti
+costituisce la sola difesa disponibile contro di esso.
+
+La fluidità del moto, misurata come modulo medio del \emph{jerk}, non risulta influenzata
+dalla correzione: la variazione resta entro l'1\% in entrambe le campagne, con rapporti
+inferiori a 0,4. Questa grandezza va peraltro interpretata con cautela nel presente
+contesto, poiché il modello cinematico adottato non prevede inerzia né limiti di
+accelerazione e il robot cambia direzione istantaneamente ai vertici del percorso; il
+valore rilevato riflette pertanto in misura preponderante la discretizzazione della
+griglia di pianificazione, e non un comportamento dinamico realistico.

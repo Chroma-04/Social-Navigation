@@ -1,0 +1,17 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- ambiente virtuale ---
+.venv/
+venv/
+
+# NOTA: dataset (.npz) e modelli (.pt) sono volutamente versionati. Sono l'artefatto su cui
+# poggiano i risultati della tesi e rigenerarli costa ore di raccolta: per la riproducibilita'
+# vale la pena tenerli, nonostante il peso.
+
+# --- editor e sistema ---
+.idea/
+Thumbs.db
+desktop.ini

@@ -209,12 +209,7 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed, fattore_griglia=FATT
     random.seed(seed)
 
     # --- ambiente e folla ---
-    griglia = [[sim.Nodo(r, c) for c in range(sim.X_TOT)] for r in range(sim.Y_TOT)]
-    sim.crea_bordi(griglia)
-    costruttore = ts.MAPPE.get(nome_mappa) or ts.MAPPE_TEST.get(nome_mappa)
-    if costruttore is None:
-        raise KeyError(f"Mappa '{nome_mappa}' non trovata ne' in MAPPE ne' in MAPPE_TEST")
-    costruttore(griglia)
+    griglia = ts.costruisci_griglia(nome_mappa)
 
     persone = [sim.crea_persona(griglia) for _ in range(popolazione["numero_persone"])]
     corridori = [sim.crea_corridore(griglia) for _ in range(popolazione["numero_corridori"])]

@@ -246,6 +246,37 @@ MIX_COMPORTAMENTALE = {
 }
 
 
+# mappe lette da file invece che costruite da un generatore, con la griglia su cui sono state disegnate.
+# Servono a provare planimetrie reali, che non stanno sulla griglia standard
+MAPPE_SALVATE = {
+    "povo": (os.path.join(sim.CARTELLA_MAPPE_SALVATE, "mappa_povo.json"), sim.X_TOT_POVO, sim.Y_TOT_POVO),
+}
+
+
+def costruisci_griglia(nome_mappa):
+    """Griglia della mappa richiesta, con le dimensioni gia' applicate al modulo.
+
+    Punto unico in cui una mappa diventa una griglia: le planimetrie da file hanno dimensioni proprie,
+    e i processi dei pool vengono riusati fra mappe diverse, quindi le dimensioni vanno riapplicate a
+    ogni costruzione invece che una volta sola all'avvio."""
+    if nome_mappa in MAPPE_SALVATE:
+        path_mappa, x_tot, y_tot = MAPPE_SALVATE[nome_mappa]
+        sim.applica_dimensioni_griglia(x_tot, y_tot)
+        griglia = [[sim.Nodo(r, c) for c in range(x_tot)] for r in range(y_tot)]
+        if not sim.carica_mappa(griglia, path_mappa):
+            raise FileNotFoundError(f"Mappa '{nome_mappa}' non trovata su disco: {path_mappa}")
+        return griglia
+
+    sim.applica_dimensioni_griglia(sim.X_TOT_STANDARD, sim.Y_TOT_STANDARD)
+    griglia = [[sim.Nodo(r, c) for c in range(sim.X_TOT)] for r in range(sim.Y_TOT)]
+    sim.crea_bordi(griglia)
+    costruttore_mappa = MAPPE.get(nome_mappa) or MAPPE_TEST.get(nome_mappa)
+    if costruttore_mappa is None:
+        raise KeyError(f"Mappa '{nome_mappa}' non trovata ne' in MAPPE ne' in MAPPE_TEST")
+    costruttore_mappa(griglia)
+    return griglia
+
+
 def costruisci_scenario(nome_mappa, nome_densita, nome_mix, seed=None):
     """Costruisce griglia + persone/corridori/persone_ferme/gruppi per la combinazione richiesta. Con lo
     stesso seed la composizione (chi/quanti) e' riproducibile; senza seed usa lo stato casuale corrente.
@@ -260,12 +291,7 @@ def costruisci_scenario(nome_mappa, nome_densita, nome_mix, seed=None):
     if seed is not None:
         random.seed(seed)
 
-    griglia = [[sim.Nodo(r, c) for c in range(sim.X_TOT)] for r in range(sim.Y_TOT)]
-    sim.crea_bordi(griglia)
-    costruttore_mappa = MAPPE.get(nome_mappa) or MAPPE_TEST.get(nome_mappa)
-    if costruttore_mappa is None:
-        raise KeyError(f"Mappa '{nome_mappa}' non trovata ne' in MAPPE ne' in MAPPE_TEST")
-    costruttore_mappa(griglia)
+    griglia = costruisci_griglia(nome_mappa)
 
     celle_libere = sum(1 for riga in griglia for n in riga if n.tipo == "libero")
     fattore_area = celle_libere / CELLE_LIBERE_RIFERIMENTO

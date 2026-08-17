@@ -1,3 +1,35 @@
+"""Simulatore interattivo di navigazione sociale: un robot attraversa un ambiente condiviso
+con una folla di pedoni, evitandoli senza limitarsi a reagire alla loro posizione presente.
+
+E' il programma principale del progetto. Contiene sia l'editor dell'ambiente sia la
+simulazione vera e propria; gli script di misura (testing.py, TEST/) importano da qui le
+funzioni del robot, cosi' che il codice provato sia lo stesso che gira dal vivo.
+
+L'architettura e' a livelli sovrapposti, ciascuno attivabile in modo indipendente dal
+pannello tecnico (TAB), perche' la tesi ne misura il contributo separatamente:
+
+  1. PIANIFICAZIONE   Theta*, variante any-angle di A*: i percorsi non sono vincolati alle
+                      otto direzioni della griglia ma collegano celle non adiacenti purche'
+                      fra loro esista linea di vista libera.
+  2. PERCEZIONE       lidar simulato a portata finita, soggetto a occlusione e a rumore
+                      sulla posizione: il robot ragiona solo su cio' che vede.
+  3. STIMA            un filtro di Kalman a velocita' costante per ogni persona rilevata,
+                      da cui si ricava la posizione futura a un secondo.
+  4. RISCHIO          la previsione diventa una macchia di probabilita' propagata attraverso
+                      lo spazio libero (non una gaussiana analitica: i muri la interrompono),
+                      convertita in costo additivo per il pianificatore.
+  5. VELOCITA'        un controllo spazio-temporale che confronta l'istante di arrivo del
+                      robot con la posizione prevista delle persone nel medesimo istante, e
+                      decide se procedere, accelerare o cedere il passo.
+  6. CORREZIONE AI    facoltativa: una rete ricorrente stima l'errore residuo del Kalman e
+                      lo somma alla previsione, senza sostituire alcun componente classico.
+
+Scala fisica: una cella vale un metro reale (vedi METRI_PER_CELLA poco sotto). I calcoli
+restano tutti in pixel, la scala serve solo a etichettare il pannello.
+
+Comandi principali: TAB pannello tecnico, W disegna muri, P mappa Povo, F5/F9 salva e
+carica, T salva mappa di training, F11 schermo intero, rotella zoom, tasto destro pan.
+"""
 import os
 os.environ["SDL_VIDEO_CENTERED"] = "1"
 import pygame
@@ -17,6 +49,12 @@ DIMENSIONI_GRIGLIA_NOTE = ((X_TOT_STANDARD, Y_TOT_STANDARD), (X_TOT_POVO, Y_TOT_
 X_TOT, Y_TOT = X_TOT_STANDARD, Y_TOT_STANDARD
 DIM_NODO = 30
 LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
+# scala fisica del simulatore: una cella vale un metro reale, quindi un pixel vale 3,33 cm.
+# La scala e' ancorata all'ingombro dei corpi (persona ~46 cm di spalle), non alle velocita':
+# a questa scala i pedoni risultano rapidi, ed e' un limite dichiarato del modello.
+# Serve solo alle etichette del pannello: i calcoli restano tutti in pixel
+METRI_PER_CELLA = 1.0
+CM_PER_PIXEL = METRI_PER_CELLA * 100 / DIM_NODO
 VELOCITA_ROBOT = 1.5
 VELOCITA_PERSONA = 1.0
 # --- controllo predittivo di velocita' del robot ---
@@ -147,6 +185,12 @@ GRIGIO_BORDO_CELLA = (182, 182, 182)  # bordo delle celle libere
 GRIGIO_SOTTOGRIGLIA = (168, 176, 196)  # suddivisioni della griglia fine del robot
 COLORE_LIDAR = (235, 200, 0)
 
+# ============================================================================================
+# PIANIFICAZIONE DEL PERCORSO
+# Ricerca informata su griglia. Nodo e' il vertice del grafo; algoritmo_a_star implementa in
+# realta' Theta* (il nome e' storico): la differenza sta in scorciatoia_libera, piu' sotto,
+# che consente di collegare un nodo al proprio nonno saltando l'intermedio.
+# ============================================================================================
 class Nodo:
     # dim_nodo sta sul nodo e non nella costante globale perche' coesistono due griglie a risoluzione
     # diversa: quella della folla e quella piu' fine del robot
@@ -245,6 +289,11 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
         n.reset_calcoli()
     return []
 
+# ============================================================================================
+# GRIGLIE E CELLE
+# Costruzione della griglia, sua versione a risoluzione doppia per il robot (che pianifica
+# piu' fine di quanto sia disegnato l'ambiente) e sorteggio di celle libere.
+# ============================================================================================
 def crea_griglia_robot(griglia_base, fattore):
     """Griglia di pianificazione del robot, 'fattore' volte piu' fine di quella della folla.
 
@@ -321,6 +370,12 @@ def cella_libera_vicina(griglia, x, y, raggio):
         return random.choice(vicine)
     return cella_libera_casuale(griglia)
 
+# ============================================================================================
+# POPOLAZIONE
+# Le quattro classi comportamentali della folla: pedoni ordinari, corridori, persone ferme e
+# gruppi coesi attorno a un capofila. Le funzioni "sincronizza_" adeguano il numero di entita'
+# presenti a quello richiesto dal pannello, creandole o rimuovendole senza ricostruire tutto.
+# ============================================================================================
 def crea_persona(griglia, fattore_velocita=None):
     if fattore_velocita is None:
         fattore_velocita = max(FATTORE_VELOCITA_MIN, min(FATTORE_VELOCITA_MAX, random.gauss(FATTORE_VELOCITA_MEDIA, FATTORE_VELOCITA_DEV_STD)))
@@ -413,6 +468,12 @@ def sincronizza_gruppi(gruppi, numero, griglia):
     while len(gruppi) > numero:
         gruppi.pop()
 
+# ============================================================================================
+# REPULSIONE FRA ENTITA'
+# La configurazione della folla non e' imposta a priori: emerge da forze locali di repulsione.
+# Confrontare ogni entita' con tutte le altre costerebbe O(n^2), proibitivo con centinaia di
+# individui: si indicizzano quindi in bucket spaziali e si guardano solo i vicini di bucket.
+# ============================================================================================
 def costruisci_griglia_spaziale(entita_list, dim_bucket):
     """Indicizza le entita' in bucket quadrati di lato dim_bucket, per cercare i vicini in O(n)
     guardando poche celle invece di confrontare ogni entita' con tutte le altre."""
@@ -460,6 +521,12 @@ def repulsione_punto(entita, px, py, raggio):
         return (dx / d) * peso, (dy / d) * peso
     return 0.0, 0.0
 
+# ============================================================================================
+# LINEA DI VISTA
+# Due usi distinti dello stesso controllo geometrico: stabilire se il lidar vede una persona
+# (occlusione dietro i muri) e se Theta* puo' collegare direttamente due nodi non adiacenti.
+# E' l'operazione piu' costosa dell'intero programma, essendo invocata a ogni espansione.
+# ============================================================================================
 def linea_di_vista_libera(griglia, x1, y1, x2, y2):
     """True se il segmento non attraversa nessun muro: simula l'occlusione del lidar. Campiona a passi
     piu' fitti del lato di una cella, cosi' non puo' saltare un muro sottile."""
@@ -498,6 +565,13 @@ def scorciatoia_libera(griglia, nodo_a, nodo_b, celle_bloccate, mappa_costo_extr
             return False
     return True
 
+# ============================================================================================
+# PERCEZIONE E STIMA DELLO STATO
+# Il lidar restituisce posizioni rumorose; la velocita' non e' osservabile e non si puo'
+# ricavare per differenze fra misure consecutive, che ne raddoppierebbero il rumore. Si
+# adotta percio' un filtro di Kalman a velocita' costante, applicato ai due assi in modo
+# indipendente e in forma scalare, dal quale si estrapola la posizione futura.
+# ============================================================================================
 def colore_rilevamento(px, py, robot_x, robot_y, raggio_lidar, raggio_sicurezza, griglia):
     """Verde se non rilevata, arancione se rilevata dal lidar, rosso se dentro la zona di sicurezza.
     La zona di sicurezza e' un limite fisico e resta attiva anche dietro un muro."""
@@ -553,6 +627,14 @@ def previsione_posizione_kalman(traccia, frame_futuri):
     macchia di probabilita'."""
     return traccia["x"] + traccia["vx"] * frame_futuri, traccia["y"] + traccia["vy"] * frame_futuri
 
+# ============================================================================================
+# REGIONE DI RISCHIO (macchia di probabilita')
+# La previsione e' un punto, ma trattarla come tale le attribuirebbe una certezza che non ha:
+# viene percio' diffusa in un intorno con peso che decade esponenzialmente con la distanza.
+# Due proprieta' la distinguono da una gaussiana analitica: e' anisotropa (si allunga lungo
+# la direzione di marcia) ed e' propagata attraverso lo spazio percorribile, sicche' i muri
+# la interrompono invece di lasciarla attraversare. Il peso diventa poi costo per Theta*.
+# ============================================================================================
 def sottocella_e_muro(griglia, rf, cf, sottocelle_per_lato):
     """True se la sottocella cade dentro un muro della griglia di movimento, o e' fuori mappa."""
     r_cella, c_cella = int(rf // sottocelle_per_lato), int(cf // sottocelle_per_lato)
@@ -608,6 +690,13 @@ def macchia_diffusione(griglia, rf_centro, cf_centro, raggio_sottocelle, decadim
             heapq.heappush(coda, (nuova_dist, rv, cv))
     return {cella: decadimento ** dist for cella, dist in distanze.items()}
 
+# ============================================================================================
+# MOVIMENTO E CONTROLLO DI VELOCITA'
+# La regione di rischio agisce su DOVE il robot passa; qui si decide QUANDO. Due traiettorie
+# che si incrociano nello spazio non danno conflitto se i corpi vi transitano in istanti
+# diversi: il controllo confronta percio' l'istante di arrivo del robot in ciascun punto con
+# la posizione prevista delle persone in quel medesimo istante, non con quella attuale.
+# ============================================================================================
 def sposta_con_vettore(x, y, vx, vy, forza, griglia):
     """Applica lo spostamento (vx, vy) * forza (repulsione o attrazione), senza attraversare muri."""
     if vx == 0 and vy == 0:
@@ -701,6 +790,11 @@ def fattore_velocita_da_conflitto(x, y, percorso, tracciamento_lidar, velocita_n
     urgenza = 1.0 - min(1.0, tempo_minimo_conflitto_nominale / FRAME_REAZIONE_VELOCITA_ROBOT)
     return 1.0 - urgenza * (1.0 - FATTORE_VELOCITA_ROBOT_MIN)
 
+# ============================================================================================
+# PERSISTENZA
+# Lettura e scrittura di mappe (JSON con le sole celle-muro), della planimetria da ricalcare
+# e della configurazione del pannello, cosi' che i parametri sopravvivano alla chiusura.
+# ============================================================================================
 def carica_planimetria(cartella=CARTELLA_PLANIMETRIE):
     """Prima immagine trovata nella cartella delle planimetrie, da usare come sfondo su cui ricalcare i
     muri a mano. Ritorna None se la cartella manca o non contiene immagini leggibili: l'overlay e'
@@ -803,6 +897,28 @@ def _crea_pool_persone(griglia):
     return mp.Pool(n_worker, initializer=_pool_inizializza_worker, initargs=(_celle_muro_di(griglia), X_TOT, Y_TOT))
 
 def main():
+    """Ciclo interattivo: editor dell'ambiente e simulazione, nella stessa finestra.
+
+    Dopo l'inizializzazione (finestra, griglia, popolazione, modello AI, pool di processi) il
+    ciclo ripete a 60 fotogrammi al secondo sempre le stesse fasi, marcate nel codice dai
+    commenti numerati corrispondenti:
+
+      0b. planimetria di sfondo da ricalcare, quando si e' in modalita' Povo
+      1.  disegno della griglia, limitato alle celle visibili nella viewport
+      2.  eventi: tastiera, mouse, disegno dei muri, comandi del pannello
+      --  commutazione di griglia, caricamento mappa e ripopolamento, raccolti in un punto
+          solo perche' cambiare le dimensioni invalida tutto cio' che le ha gia' incorporate
+      3.  robot: rilevamento lidar, aggiornamento delle tracce, costruzione della regione di
+          rischio, ricalcolo del percorso, controllo di velocita' e avanzamento
+      3b. folla: repulsione fra vicini, ricalcolo dei percorsi in parallelo, movimento
+      4.  rendering di persone, robot, percorso e sovrapposizioni diagnostiche
+      5.  finestre modali di salvataggio e caricamento mappa
+      6.  pannello tecnico (TAB), da cui si regolano i parametri e si attivano i livelli
+
+    L'ordine non e' arbitrario: gli eventi precedono il movimento perche' una modifica dei
+    muri deve avere effetto nello stesso fotogramma, e il rendering segue il movimento perche'
+    altrimenti mostrerebbe lo stato del fotogramma precedente.
+    """
     # import locali e non di modulo: i worker del pool re-importano main.py per intero ma non usano
     # l'AI, e caricare torch/CUDA in ognuno allungava l'avvio di decine di secondi
     import numpy as np
@@ -2150,7 +2266,7 @@ def main():
             numero_ferme_txt = font.render(valore_ferme_mostrato, True, NERO)
             screen.blit(numero_ferme_txt, (numero_ferme_box_rect.x + 8, numero_ferme_box_rect.y + 4))
 
-            sicurezza_txt = font.render(f"Zona sicurezza robot: {int(raggio_sicurezza)}px", True, NERO)
+            sicurezza_txt = font.render(f"Zona sicurezza: raggio {raggio_sicurezza * CM_PER_PIXEL:.0f} cm", True, NERO)
             screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 245))
             pygame.draw.rect(screen, ROSSO if sicurezza_attiva else BIANCO, checkbox_sicurezza_rect)
             pygame.draw.rect(screen, NERO, checkbox_sicurezza_rect, 2)
@@ -2160,7 +2276,7 @@ def main():
             handle_sic_x = slider_sicurezza_rect.x + int(rel_sic * slider_sicurezza_rect.width)
             pygame.draw.circle(screen, ROSSO, (handle_sic_x, slider_sicurezza_rect.centery), 9)
 
-            robot_txt = font.render(f"Dimensione robot: {int(raggio_robot)}px", True, NERO)
+            robot_txt = font.render(f"Ingombro robot: {2 * raggio_robot * CM_PER_PIXEL:.0f} cm", True, NERO)
             screen.blit(robot_txt, (panel_rect.x + 15, panel_rect.y + 320))
 
             pygame.draw.rect(screen, GRIGIO, slider_robot_rect)
@@ -2168,7 +2284,7 @@ def main():
             handle_robot_x = slider_robot_rect.x + int(rel_robot * slider_robot_rect.width)
             pygame.draw.circle(screen, BLU, (handle_robot_x, slider_robot_rect.centery), 9)
 
-            lidar_txt = font.render(f"Raggio lidar: {int(raggio_lidar)}px", True, NERO)
+            lidar_txt = font.render(f"Raggio lidar: {raggio_lidar * CM_PER_PIXEL / 100:.2f} m", True, NERO)
             screen.blit(lidar_txt, (panel_rect.x + 15, panel_rect.y + 395))
             pygame.draw.rect(screen, COLORE_LIDAR if lidar_attivo else BIANCO, checkbox_lidar_rect)
             pygame.draw.rect(screen, NERO, checkbox_lidar_rect, 2)
@@ -2178,7 +2294,7 @@ def main():
             handle_lidar_x = slider_lidar_rect.x + int(rel_lidar * slider_lidar_rect.width)
             pygame.draw.circle(screen, COLORE_LIDAR, (handle_lidar_x, slider_lidar_rect.centery), 9)
 
-            persona_txt = font.render(f"Dimensione persone: {int(raggio_persona)}px", True, NERO)
+            persona_txt = font.render(f"Ingombro persone: {2 * raggio_persona * CM_PER_PIXEL:.0f} cm", True, NERO)
             screen.blit(persona_txt, (panel_rect.x + 15, panel_rect.y + 470))
 
             pygame.draw.rect(screen, GRIGIO, slider_persona_rect)
