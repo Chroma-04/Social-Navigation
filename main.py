@@ -55,14 +55,61 @@ LARGHEZZA, ALTEZZA = X_TOT * DIM_NODO, Y_TOT * DIM_NODO
 # Serve solo alle etichette del pannello: i calcoli restano tutti in pixel
 METRI_PER_CELLA = 1.0
 CM_PER_PIXEL = METRI_PER_CELLA * 100 / DIM_NODO
-VELOCITA_ROBOT = 1.5
-VELOCITA_PERSONA = 1.0
+# Velocita' in pixel per fotogramma. Alla scala di questo simulatore la conversione e'
+# immediata: px/frame x 2 = m/s (30 px per metro, 60 fotogrammi al secondo).
+#
+# I valori precedenti (robot 1.5, persone 1.0, cioe' 3,0 e 2,0 m/s) erano fuori scala e,
+# soprattutto, invertiti rispetto alla realta': il robot risultava una volta e mezza piu'
+# veloce di chi cammina. In quella condizione cedere il passo non scioglie un conflitto, lo
+# prolunga - il robot raggiunge le persone da dietro e restare dietro e' l'unico esito.
+# Ora il robot va poco piu' piano del pedone medio, come un robot di servizio vero, ed e' la
+# folla a scorrergli attorno: e' il regime in cui l'anticipazione ha qualcosa da guadagnare.
+VELOCITA_ROBOT = 0.5     # 1,0 m/s: robot di servizio da interni (0,5-1,2 m/s tipici)
+# 1,0 m/s e' il passo medio in ambiente chiuso e affollato, sotto gli 1,2-1,4 m/s di
+# camminata libera: in corridoio ci si adegua a chi sta davanti. I corridori, x2, vanno a 2,0 m/s.
+# Il rapporto con VELOCITA_ROBOT e' cio' che conta - scalare tutto insieme non cambia nulla nella
+# simulazione - e qui vale 1: il robot tiene il passo della folla in crociera e la supera in punta.
+VELOCITA_PERSONA = 0.5
 # --- controllo predittivo di velocita' del robot ---
-FATTORE_VELOCITA_ROBOT_MIN = 0.35  # velocita' minima, come frazione di VELOCITA_ROBOT
-FATTORE_VELOCITA_ROBOT_MAX = 1.25  # velocita' massima (sprint) come frazione di VELOCITA_ROBOT
+# Banda di autorita' del controllo, come frazione di VELOCITA_ROBOT (1,0 m/s): da 0,2 a 2,0 m/s.
+# I valori precedenti (0,35-1,25) lasciavano al controllo un margine di appena un quarto sopra la
+# nominale, insufficiente a sciogliere un conflitto: sull'orizzonte di lookahead di 5 m lo sprint
+# guadagnava circa un secondo, mentre il pedone nel frattempo si spostava di piu' di un metro. Con
+# il tetto a 2,0 m/s il robot percorre quei 5 m in 2,5 s invece di 5, e il ramo di accelerazione
+# torna a poter fare cio' per cui esiste.
+# Il tetto coincide con la velocita' dei corridori (2,0 m/s): a piena autorita' il robot tiene il
+# passo di chi corre, senza superarlo. Il pavimento a 0,2 m/s e' un passo lentissimo, non un
+# arresto: fermarsi resta compito del meccanismo di sicurezza, che e' separato.
+FATTORE_VELOCITA_ROBOT_MIN = 0.20
+FATTORE_VELOCITA_ROBOT_MAX = 2.00
+
+# Limiti dinamici del robot, in m/s^2. Senza di essi il robot passa da fermo a velocita' massima
+# in un fotogramma e fermarsi non costa nulla: e' la riserva dichiarata al paragrafo sul controllo
+# di velocita', per cui qualunque anticipazione parte svantaggiata. Con accelerazione finita ogni
+# arresto si paga con la decelerazione e con la ripartenza.
+#
+# Valori di riferimento: i robot di servizio da interni usano tipicamente 0,3 m/s^2 in accelerazione
+# e 0,6 in decelerazione, mentre i pianificatori locali di ROS stanno in pratica fra 0,8 e 2,5. Si
+# adotta una via di mezzo conservativa, mantenendo l'asimmetria dei sistemi reali: frenare e'
+# consentito piu' in fretta che accelerare, essendo la frenata anche una funzione di sicurezza.
+# Con questi valori il robot passa da fermo alla crociera di 1,0 m/s in 2 s e si arresta in 1 s.
+ACCELERAZIONE_ROBOT_M_S2 = 0.5
+DECELERAZIONE_ROBOT_M_S2 = 1.0
 DISTANZA_LOOKAHEAD_VELOCITA_PX = DIM_NODO * 5  # quanto avanti si guarda sul percorso
 MARGINE_SICUREZZA_CONFLITTO_PX = 6  # franco oltre la somma dei raggi robot+persona
 FRAME_REAZIONE_VELOCITA_ROBOT = 90  # orizzonte entro cui un conflitto previsto fa rallentare
+# --- controllo di POSIZIONE (evitamento laterale predittivo) ---
+# Il controllo di velocita' decide quanto forte andare su un percorso fissato; questo decide dove
+# stare entro un intorno del percorso. Serve perche' gli arresti di sicurezza sono innescati in
+# maggioranza da persone che arrivano DI LATO, invisibili a un controllo che guarda solo avanti
+# lungo la traiettoria, e perche' rallentare non aumenta la distanza dalle persone: la traslazione
+# laterale si'. I due controlli sono indipendenti e attivabili separatamente.
+RAGGIO_MANOVRA_PX = DIM_NODO  # 1 m: quanto lontano dal percorso si cerca una posizione migliore
+PREVISIONE_EVITAMENTO_FRAME = 60  # 1 s: orizzonte su cui si proiettano le persone tracciate
+SIGMA_REPULSIONE_PX = DIM_NODO  # 1 m: larghezza della campana di repulsione di una singola persona
+PESO_RITORNO_PERCORSO = 0.6  # quanto pesa restare sul percorso rispetto allo stare lontani
+VELOCITA_LATERALE_MAX_M_S = 0.5  # meta' della crociera: la traslazione ha velocita' finita
+RAGGIO_INTERESSE_EVITAMENTO_PX = DIM_NODO * 4  # oltre 4 m una persona non influenza la scelta
 ATTESA_PERSONA_MIN_FRAME = 1 * 60  # attesa minima dopo l'arrivo, in frame (60 FPS)
 ATTESA_PERSONA_MAX_FRAME = 4 * 60  # attesa massima dopo l'arrivo, in frame
 PROBABILITA_PERCORSO_BREVE = 0.35  # probabilita' che la prossima meta sia vicina invece che casuale
@@ -100,6 +147,52 @@ PASSO_SCALA_PLANIMETRIA = 0.01
 SCALA_PLANIMETRIA_MIN, SCALA_PLANIMETRIA_MAX = 0.2, 3.0
 PIXEL_MAX_SMOOTHSCALE = 12_000_000  # oltre questa area la planimetria si riscala col metodo veloce
 PASSO_SCROLL_PANNELLO = 40  # px di scorrimento del pannello tecnico per scatto di rotella
+# Layout del pannello tecnico. Le posizioni si ricavano scorrendo un cursore invece di essere numeri
+# fissi: aggiungere, togliere o riordinare una voce non puo' quindi produrre sovrapposizioni, che con
+# gli offset scritti a mano si erano gia' verificate - i pulsanti finivano sopra la casella della
+# planimetria e il messaggio di conferma sopra un interruttore. Il pannello e' diviso in due blocchi:
+# prima tutti i CURSORI e i campi numerici, poi tutti gli INTERRUTTORI.
+PASSO_CURSORE_PANNELLO = 72   # etichetta sopra, cursore sotto, piu' respiro
+PASSO_NUMERO_PANNELLO = 35    # etichetta e casella numerica sulla stessa riga
+PASSO_CASELLA_PANNELLO = 32   # etichetta e casella di spunta sulla stessa riga
+PASSO_SEZIONE_PANNELLO = 30   # stacco fra i due blocchi
+
+def layout_pannello():
+    """Offset verticali di ogni voce del pannello, piu' l'altezza totale che ne risulta."""
+    y, cursore = {}, 10
+    y["titolo"] = cursore
+    cursore += 38
+
+    # --- blocco dei cursori e dei campi numerici ---
+    y["vel_label"] = cursore
+    y["vel_slider"] = cursore + 30
+    cursore += PASSO_CURSORE_PANNELLO
+    for nome in ("persone", "corridori", "gruppi", "ferme"):
+        y[nome + "_label"] = cursore
+        y[nome + "_box"] = cursore - 5
+        cursore += PASSO_NUMERO_PANNELLO
+    cursore += 10
+    for nome in ("sicurezza", "robot", "lidar", "persona", "definizione", "planimetria"):
+        y[nome + "_label"] = cursore
+        y[nome + "_slider"] = cursore + 30
+        cursore += PASSO_CURSORE_PANNELLO
+    y["allineamento"] = cursore
+    cursore += 28
+
+    # --- blocco degli interruttori ---
+    y["intestazione_caselle"] = cursore
+    cursore += PASSO_SEZIONE_PANNELLO
+    for nome in ("sicurezza", "lidar", "ellissoidi", "ai", "velocita", "strada",
+                 "posizione", "griglia", "planimetria"):
+        y["cb_" + nome] = cursore
+        cursore += PASSO_CASELLA_PANNELLO
+
+    cursore += 14
+    y["pulsanti"] = cursore
+    cursore += 45
+    y["messaggio"] = cursore
+    cursore += 25
+    return y, cursore
 FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
 VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 25.0
 NUMERO_PERSONE_DEFAULT = 0
@@ -627,6 +720,17 @@ def previsione_posizione_kalman(traccia, frame_futuri):
     macchia di probabilita'."""
     return traccia["x"] + traccia["vx"] * frame_futuri, traccia["y"] + traccia["vy"] * frame_futuri
 
+
+# Punto di innesto del CONTROLLO DI VELOCITA'. La funzione qui sotto viene chiamata da
+# fattore_velocita_da_conflitto per proiettare le persone tracciate; sostituendola si cambia la
+# sorgente di previsione del solo controllo, senza toccare la macchia di probabilita' del
+# pianificatore, che continua a usare il Kalman. Serve a due cose, entrambe in ai_controllo/:
+#   - il CONTROLLO ORACOLO, che riceve le posizioni future vere e misura quanto del limite del
+#     controllo dipende dall'errore di previsione invece che dalla sua struttura;
+#   - l'eventuale rete addestrata a riprodurre le decisioni dell'oracolo.
+# Il valore predefinito lascia il comportamento identico a prima.
+previsione_per_controllo = previsione_posizione_kalman
+
 # ============================================================================================
 # REGIONE DI RISCHIO (macchia di probabilita')
 # La previsione e' un punto, ma trattarla come tale le attribuirebbe una certezza che non ha:
@@ -739,7 +843,8 @@ def passo_movimento(x, y, percorso, velocita, nodo_target, griglia):
     return tx, ty, len(percorso) <= 1, False
 
 def fattore_velocita_da_conflitto(x, y, percorso, tracciamento_lidar, velocita_nominale, raggio_robot, raggio_persona,
-                                   distanza_lookahead_px=DISTANZA_LOOKAHEAD_VELOCITA_PX):
+                                   distanza_lookahead_px=DISTANZA_LOOKAHEAD_VELOCITA_PX,
+                                   strada_libera_al_massimo=False):
     """Frazione della velocita' nominale del robot, fra FATTORE_VELOCITA_ROBOT_MIN e MAX.
 
     E' un controllo spazio-temporale: la traiettoria prevista di ogni persona tracciata viene confrontata
@@ -774,15 +879,22 @@ def fattore_velocita_da_conflitto(x, y, percorso, tracciamento_lidar, velocita_n
             tempo_arrivo_sprint = distanza_percorsa / velocita_sprint
             for traccia in persone_dinamiche:
                 if tempo_minimo_conflitto_nominale is None or tempo_arrivo_nominale < tempo_minimo_conflitto_nominale:
-                    xp, yp = previsione_posizione_kalman(traccia, tempo_arrivo_nominale)
+                    xp, yp = previsione_per_controllo(traccia, tempo_arrivo_nominale)
                     if math.hypot(xc - xp, yc - yp) < soglia_sicurezza:
                         tempo_minimo_conflitto_nominale = tempo_arrivo_nominale
                 if tempo_minimo_conflitto_sprint is None or tempo_arrivo_sprint < tempo_minimo_conflitto_sprint:
-                    xp_s, yp_s = previsione_posizione_kalman(traccia, tempo_arrivo_sprint)
+                    xp_s, yp_s = previsione_per_controllo(traccia, tempo_arrivo_sprint)
                     if math.hypot(xc - xp_s, yc - yp_s) < soglia_sicurezza:
                         tempo_minimo_conflitto_sprint = tempo_arrivo_sprint
         x_prec, y_prec = nodo.cx, nodo.cy
 
+    # STRADA LIBERA AL MASSIMO. Nella versione classica il ramo sotto e' irraggiungibile a strada
+    # libera: se non c'e' conflitto a velocita' nominale si esce subito con 1.0, e il massimo si usa
+    # solo per sfilare davanti a qualcuno. Il robot non sfrutta quindi mai la banda alta per il
+    # motivo per cui esiste - andare forte quando non c'e' nessuno. Qui l'obiettivo si ribalta:
+    # se nemmeno andando al massimo si incontra qualcuno, si va al massimo.
+    if strada_libera_al_massimo and tempo_minimo_conflitto_sprint is None:
+        return FATTORE_VELOCITA_ROBOT_MAX
     if tempo_minimo_conflitto_nominale is None:
         return 1.0  # nessun conflitto previsto entro l'orizzonte
     if tempo_minimo_conflitto_sprint is None:
@@ -790,11 +902,131 @@ def fattore_velocita_da_conflitto(x, y, percorso, tracciamento_lidar, velocita_n
     urgenza = 1.0 - min(1.0, tempo_minimo_conflitto_nominale / FRAME_REAZIONE_VELOCITA_ROBOT)
     return 1.0 - urgenza * (1.0 - FATTORE_VELOCITA_ROBOT_MIN)
 
+
+def _candidati_manovra(x, y):
+    """Posizioni candidate attorno al robot: il centro, piu' due corone di otto direzioni."""
+    yield x, y
+    for frazione in (0.5, 1.0):
+        raggio = RAGGIO_MANOVRA_PX * frazione
+        for k in range(8):
+            angolo = math.pi * k / 4
+            yield x + raggio * math.cos(angolo), y + raggio * math.sin(angolo)
+
+
+def _distanza_da_segmento(px, py, ax, ay, bx, by):
+    """Distanza del punto dal SEGMENTO AB, non dai suoi estremi: e' cosi' che si misura lo
+    scostamento dalla traiettoria senza che il robot venga attirato nei centri delle celle."""
+    dx, dy = bx - ax, by - ay
+    lunghezza_quad = dx * dx + dy * dy
+    if lunghezza_quad <= 1e-12:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / lunghezza_quad))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def offset_evitamento_predittivo(x, y, percorso, tracciamento_lidar, griglia, passi_reali=1):
+    """Traslazione laterale da sovrapporre al passo lungo il percorso di Theta*.
+
+    E' un controllo di POSIZIONE, complementare a quello di velocita'. Theta* continua a
+    scegliere il percorso sui costi di cella; questo strato decide dove stare ENTRO un
+    intorno di quel percorso, per aggirare le persone invece di limitarsi a rallentare.
+
+    La ragione e' misurata: gli arresti di sicurezza scattano a 40 cm in ogni direzione, e
+    sono innescati in maggioranza da persone che arrivano di lato - che il controllo di
+    velocita' non puo' anticipare, guardando solo avanti lungo la traiettoria. Rallentare
+    inoltre non aumenta la distanza dalle persone: allunga la permanenza nella folla, e
+    quindi le occasioni di essere fermati. Una traslazione agisce invece proprio sulla
+    grandezza che fa scattare l'arresto.
+
+    Il metodo e' a CAMPIONAMENTO e non a gradiente: si valutano alcune posizioni candidate
+    in un disco attorno al robot e si sceglie la migliore. Il campionamento tratta i muri
+    come esclusioni e non resta intrappolato nei minimi locali, dove un gradiente si
+    fermerebbe fra due persone invece di scegliere da che parte passare.
+
+    Il punteggio SOVRAPPONE gli effetti di tutte le persone viste:
+      - RISCHIO: una campana per ogni persona tracciata, valutata a piu' istanti futuri
+        della sua traiettoria prevista. Sommandole, due persone vicine generano una zona
+        peggiore di quanto ciascuna farebbe da sola - ed e' il caso in cui piu' conviene
+        passare altrove;
+      - RITORNO: distanza dal percorso, che tiene lo scostamento limitato e riporta il
+        robot in traiettoria appena il rischio si dirada;
+      - MURI: i candidati fuori mappa o dentro un muro vengono scartati.
+
+    Ritorna lo spostamento (dx, dy) per QUESTO fotogramma, gia' limitato in modulo perche'
+    la traslazione laterale abbia una velocita' finita come quella longitudinale.
+    'passi_reali' vale 1 dal vivo e ACCELERAZIONE negli script di misura, come in
+    limita_accelerazione.
+    """
+    if not percorso:
+        return 0.0, 0.0
+    # solo i corpi mobili, e solo quelli abbastanza vicini da poter cambiare la scelta
+    persone = [t for t in tracciamento_lidar.values()
+               if not t.get("ferma", False)
+               and math.hypot(t["x"] - x, t["y"] - y) < RAGGIO_INTERESSE_EVITAMENTO_PX]
+    if not persone:
+        return 0.0, 0.0
+
+    # le previsioni si calcolano una volta sola per persona e per istante: rifarle dentro il
+    # ciclo dei candidati costerebbe un fattore pari al numero di candidati
+    istanti = (0.0, PREVISIONE_EVITAMENTO_FRAME * 0.5, float(PREVISIONE_EVITAMENTO_FRAME))
+    previsioni = [previsione_posizione_kalman(traccia, istante)
+                  for traccia in persone for istante in istanti]
+
+    nodo = percorso[0]
+    due_sigma_quad = 2.0 * SIGMA_REPULSIONE_PX ** 2
+    migliore, punteggio_migliore = None, None
+    for cx, cy in _candidati_manovra(x, y):
+        r, c = int(cy // DIM_NODO), int(cx // DIM_NODO)
+        if not (0 <= r < Y_TOT and 0 <= c < X_TOT) or griglia[r][c].tipo == "muro":
+            continue
+        rischio = 0.0
+        for px, py in previsioni:
+            rischio += math.exp(-((cx - px) ** 2 + (cy - py) ** 2) / due_sigma_quad)
+        scostamento = _distanza_da_segmento(cx, cy, x, y, nodo.cx, nodo.cy)
+        punteggio = rischio + PESO_RITORNO_PERCORSO * scostamento / SIGMA_REPULSIONE_PX
+        if punteggio_migliore is None or punteggio < punteggio_migliore:
+            migliore, punteggio_migliore = (cx, cy), punteggio
+
+    if migliore is None:
+        return 0.0, 0.0  # tutto muro attorno: nessuna manovra possibile
+    dx, dy = migliore[0] - x, migliore[1] - y
+    modulo = math.hypot(dx, dy)
+    if modulo <= 1e-9:
+        return 0.0, 0.0
+    # la scelta viene rifatta a ogni fotogramma: qui si percorre solo un tratto del cammino
+    # verso il candidato, cosi' la traslazione ha una velocita' finita e non salta di lato
+    massimo = VELOCITA_LATERALE_MAX_M_S * VELOCITA_ROBOT * passi_reali
+    if modulo > massimo:
+        dx, dy = dx / modulo * massimo, dy / modulo * massimo
+    return dx, dy
+
 # ============================================================================================
 # PERSISTENZA
 # Lettura e scrittura di mappe (JSON con le sole celle-muro), della planimetria da ricalcare
 # e della configurazione del pannello, cosi' che i parametri sopravvivano alla chiusura.
 # ============================================================================================
+def limita_accelerazione(fattore_voluto, fattore_precedente, passi_reali=1):
+    """Limita di quanto il fattore di velocita' puo' cambiare in un fotogramma.
+
+    Senza questo vincolo il robot passa da fermo a velocita' massima istantaneamente, e
+    fermarsi non costa nulla: e' il limite dichiarato in tesi al §3.2.3, per cui qualunque
+    controllo anticipativo parte svantaggiato. Con un'accelerazione finita ogni arresto si
+    paga con la decelerazione e con la ripartenza, e ridurre il numero di fermate diventa
+    un guadagno reale invece che contabile.
+
+    I limiti sono asimmetrici, come nei robot reali: frenare e' consentito piu' in fretta
+    che accelerare, essendo la frenata anche una funzione di sicurezza.
+
+    'passi_reali' e' quanti fotogrammi reali vale un passo di simulazione: vale 1 dal vivo e
+    ACCELERAZIONE negli script di misura, che girano a passo accelerato.
+    """
+    delta_max = (ACCELERAZIONE_ROBOT_M_S2 if fattore_voluto > fattore_precedente
+                 else DECELERAZIONE_ROBOT_M_S2) * passi_reali / VELOCITA_ROBOT / 120.0
+    if fattore_voluto > fattore_precedente:
+        return min(fattore_voluto, fattore_precedente + delta_max)
+    return max(fattore_voluto, fattore_precedente - delta_max)
+
+
 def carica_planimetria(cartella=CARTELLA_PLANIMETRIE):
     """Prima immagine trovata nella cartella delle planimetrie, da usare come sfondo su cui ricalcare i
     muri a mano. Ritorna None se la cartella manca o non contiene immagini leggibili: l'overlay e'
@@ -999,6 +1231,11 @@ def main():
     richiesta_percorsi_pendente = None  # batch in volo presso il pool, None se nessuno
     persone_richiesta_percorsi_pendente = []
 
+    # velocita' corrente del robot come frazione della nominale. Parte da zero perche' il robot parte
+    # da fermo, e cambia solo entro i limiti di accelerazione: ogni arresto costa la decelerazione e la
+    # successiva ripartenza, invece di essere gratuito come in un modello puramente cinematico
+    fattore_velocita_corrente = 0.0
+
     # --- VARIABILI ZOOM E PAN ---
     zoom = 1.0
     offset_x, offset_y = 0, 0
@@ -1052,6 +1289,14 @@ def main():
     # sotto. Migliora la previsione ma non i tempi di percorrenza, vedi ai_predittiva/__init__.py
     ai_attiva = False
     controllo_velocita_attivo = True  # rallenta il robot in base al rischio previsto sul percorso
+    # controllo di posizione: spento di default, e' l'aggiunta in valutazione. Trasla il robot di
+    # lato rispetto al percorso di Theta* per aggirare le persone invece di rallentare soltanto
+    controllo_posizione_attivo = False
+    # strada libera al massimo: cambia l'obiettivo del controllo di velocita' da "non scontrarsi"
+    # a "non avere nessuno davanti". Acceso di default perche' e' l'unica variante con un
+    # guadagno stabilito sui tempi (-17/-21% sotto le 8 persone ogni 100 m2); sopra le 17 il
+    # segno si inverte, vedi tesi/capitolo_velocita_dati.txt
+    strada_libera_attiva = True
     configurazione_salvataggio_timer = 0  # conferma visiva dopo il click sui pulsanti del pannello
     configurazione_messaggio = ("", VERDE)
 
@@ -1073,6 +1318,8 @@ def main():
         ellissoidi_attivi = configurazione_salvata.get("ellissoidi_attivi", ellissoidi_attivi)
         ai_attiva = configurazione_salvata.get("ai_attiva", ai_attiva)
         controllo_velocita_attivo = configurazione_salvata.get("controllo_velocita_attivo", controllo_velocita_attivo)
+        controllo_posizione_attivo = configurazione_salvata.get("controllo_posizione_attivo", controllo_posizione_attivo)
+        strada_libera_attiva = configurazione_salvata.get("strada_libera_attiva", strada_libera_attiva)
         planimetria_visibile = configurazione_salvata.get("planimetria_visibile", planimetria_visibile)
         alpha_planimetria = configurazione_salvata.get("alpha_planimetria", alpha_planimetria)
         scala_planimetria_x = configurazione_salvata.get("scala_planimetria_x", scala_planimetria_x)
@@ -1149,33 +1396,46 @@ def main():
         # layout del pannello tecnico, ricalcolato ogni frame per seguire il ridimensionamento. Su una
         # finestra piu' bassa del pannello i controlli in fondo starebbero fuori schermo: lo scorrimento
         # alza tutto il blocco, e ogni rettangolo figlio lo segue perche' e' ancorato a panel_rect.y
-        panel_w, panel_h = 370, 850
+        Y_PANNELLO, panel_h = layout_pannello()
+        panel_w = 370
         scroll_pannello_max = max(0, panel_h - (screen.get_height() - 40))
         scroll_pannello = max(0, min(scroll_pannello_max, scroll_pannello))
         panel_rect = pygame.Rect(screen.get_width() - panel_w - 20, 20 - scroll_pannello, panel_w, panel_h)
-        slider_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 75, panel_w - 30, 8)
-        numero_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 100, 70, 30)
-        numero_corridori_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 135, 70, 30)
-        numero_gruppi_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 170, 70, 30)
-        numero_ferme_box_rect = pygame.Rect(panel_rect.x + 215, panel_rect.y + 205, 70, 30)
-        slider_sicurezza_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 275, panel_w - 30, 8)
-        slider_robot_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 350, panel_w - 30, 8)
-        slider_lidar_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 425, panel_w - 30, 8)
-        slider_persona_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 500, panel_w - 30, 8)
-        slider_definizione_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 575, panel_w - 30, 8)
-        checkbox_sicurezza_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 243, 20, 20)
-        checkbox_lidar_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 393, 20, 20)
-        checkbox_ellissoidi_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 543, 20, 20)
-        checkbox_ai_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 608, 20, 20)
-        checkbox_velocita_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 645, 20, 20)
-        checkbox_griglia_fine_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 682, 20, 20)
-        checkbox_planimetria_rect = pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + 719, 20, 20)
-        slider_planimetria_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 751, panel_w - 30, 8)
+
+        def _riga_cursore(chiave):
+            return pygame.Rect(panel_rect.x + 15, panel_rect.y + Y_PANNELLO[chiave], panel_w - 30, 8)
+
+        def _riga_casella(chiave):
+            return pygame.Rect(panel_rect.x + panel_w - 35, panel_rect.y + Y_PANNELLO[chiave] - 2, 20, 20)
+
+        def _riga_numero(chiave):
+            return pygame.Rect(panel_rect.x + 215, panel_rect.y + Y_PANNELLO[chiave], 70, 30)
+
+        slider_rect = _riga_cursore("vel_slider")
+        numero_box_rect = _riga_numero("persone_box")
+        numero_corridori_box_rect = _riga_numero("corridori_box")
+        numero_gruppi_box_rect = _riga_numero("gruppi_box")
+        numero_ferme_box_rect = _riga_numero("ferme_box")
+        slider_sicurezza_rect = _riga_cursore("sicurezza_slider")
+        slider_robot_rect = _riga_cursore("robot_slider")
+        slider_lidar_rect = _riga_cursore("lidar_slider")
+        slider_persona_rect = _riga_cursore("persona_slider")
+        slider_definizione_rect = _riga_cursore("definizione_slider")
+        slider_planimetria_rect = _riga_cursore("planimetria_slider")
+        checkbox_sicurezza_rect = _riga_casella("cb_sicurezza")
+        checkbox_lidar_rect = _riga_casella("cb_lidar")
+        checkbox_ellissoidi_rect = _riga_casella("cb_ellissoidi")
+        checkbox_ai_rect = _riga_casella("cb_ai")
+        checkbox_velocita_rect = _riga_casella("cb_velocita")
+        checkbox_strada_libera_rect = _riga_casella("cb_strada")
+        checkbox_posizione_rect = _riga_casella("cb_posizione")
+        checkbox_griglia_fine_rect = _riga_casella("cb_griglia")
+        checkbox_planimetria_rect = _riga_casella("cb_planimetria")
         # pulsanti sempre in fondo al pannello, per avere l'ambiente di test preferito pronto ad ogni avvio
         larghezza_pulsante_config = (panel_w - 30 - 20) // 3
-        button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + 800, larghezza_pulsante_config, 35)
-        button_carica_config_rect = pygame.Rect(button_salva_config_rect.right + 10, panel_rect.y + 800, larghezza_pulsante_config, 35)
-        button_reset_config_rect = pygame.Rect(button_carica_config_rect.right + 10, panel_rect.y + 800, larghezza_pulsante_config, 35)
+        button_salva_config_rect = pygame.Rect(panel_rect.x + 15, panel_rect.y + Y_PANNELLO["pulsanti"], larghezza_pulsante_config, 35)
+        button_carica_config_rect = pygame.Rect(button_salva_config_rect.right + 10, panel_rect.y + Y_PANNELLO["pulsanti"], larghezza_pulsante_config, 35)
+        button_reset_config_rect = pygame.Rect(button_carica_config_rect.right + 10, panel_rect.y + Y_PANNELLO["pulsanti"], larghezza_pulsante_config, 35)
 
         # 2. Eventi
         for event in pygame.event.get():
@@ -1272,6 +1532,10 @@ def main():
                         ai_attiva = not ai_attiva
                     elif checkbox_velocita_rect.collidepoint(event.pos):
                         controllo_velocita_attivo = not controllo_velocita_attivo
+                    elif checkbox_strada_libera_rect.collidepoint(event.pos):
+                        strada_libera_attiva = not strada_libera_attiva
+                    elif checkbox_posizione_rect.collidepoint(event.pos):
+                        controllo_posizione_attivo = not controllo_posizione_attivo
                     elif checkbox_griglia_fine_rect.collidepoint(event.pos):
                         griglia_fine_attiva = not griglia_fine_attiva  # la griglia viene rifatta a inizio frame
                     elif button_salva_config_rect.collidepoint(event.pos):
@@ -1285,6 +1549,8 @@ def main():
                             "sicurezza_attiva": sicurezza_attiva, "lidar_attivo": lidar_attivo,
                             "ellissoidi_attivi": ellissoidi_attivi, "ai_attiva": ai_attiva,
                             "controllo_velocita_attivo": controllo_velocita_attivo,
+                            "controllo_posizione_attivo": controllo_posizione_attivo,
+                            "strada_libera_attiva": strada_libera_attiva,
                             "griglia_fine_attiva": griglia_fine_attiva,
                             "planimetria_visibile": planimetria_visibile,
                             "alpha_planimetria": alpha_planimetria,
@@ -1317,6 +1583,8 @@ def main():
                             ellissoidi_attivi = configurazione_da_caricare.get("ellissoidi_attivi", ellissoidi_attivi)
                             ai_attiva = configurazione_da_caricare.get("ai_attiva", ai_attiva)
                             controllo_velocita_attivo = configurazione_da_caricare.get("controllo_velocita_attivo", controllo_velocita_attivo)
+                            controllo_posizione_attivo = configurazione_da_caricare.get("controllo_posizione_attivo", controllo_posizione_attivo)
+                            strada_libera_attiva = configurazione_da_caricare.get("strada_libera_attiva", strada_libera_attiva)
                             griglia_fine_attiva = configurazione_da_caricare.get("griglia_fine_attiva", griglia_fine_attiva)
                             planimetria_visibile = configurazione_da_caricare.get("planimetria_visibile", planimetria_visibile)
                             alpha_planimetria = configurazione_da_caricare.get("alpha_planimetria", alpha_planimetria)
@@ -1341,6 +1609,8 @@ def main():
                         raggio_lidar, raggio_persona = RAGGIO_LIDAR_DEFAULT, RAGGIO_PERSONA_DEFAULT
                         definizione_ellissoidi = SOTTOCELLE_PER_LATO_DEFAULT
                         sicurezza_attiva = lidar_attivo = ellissoidi_attivi = ai_attiva = controllo_velocita_attivo = True
+                        controllo_posizione_attivo = False  # aggiunta in valutazione: resta opt-in
+                        strada_libera_attiva = True
                         griglia_fine_attiva = GRIGLIA_FINE_DEFAULT
                         planimetria_visibile = True
                         alpha_planimetria = ALPHA_PLANIMETRIA_DEFAULT
@@ -1846,6 +2116,9 @@ def main():
                     mappa_costo_probabilita[cella] = costo
             mappa_pesi_render_dim_sottocella = dim_sottocella  # ricordata per il disegno, che avviene in un punto diverso del frame
 
+        if robot_bloccato:
+            fattore_velocita_corrente = 0.0  # arresto d'emergenza: la ripartenza risale l'intera rampa
+
         if target_pos and not robot_bloccato:
             # il click da' una cella della griglia grossa: se ne prende la sottocella centrale
             target_robot = (target_pos[0] * fattore_robot + fattore_robot // 2,
@@ -1882,10 +2155,23 @@ def main():
                 percorso = algoritmo_a_star(griglia_robot, (robot_x, robot_y), target_robot, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_extra_robot)
             meta_nodo = griglia_robot[target_robot[0]][target_robot[1]]
             velocita_nominale_robot = VELOCITA_ROBOT * moltiplicatore_velocita
-            fattore_velocita_rischio = fattore_velocita_da_conflitto(
-                robot_x, robot_y, percorso, tracciamento_lidar, velocita_nominale_robot, raggio_robot, raggio_persona
+            fattore_velocita_voluto = fattore_velocita_da_conflitto(
+                robot_x, robot_y, percorso, tracciamento_lidar, velocita_nominale_robot, raggio_robot,
+                raggio_persona, strada_libera_al_massimo=strada_libera_attiva
             ) if controllo_velocita_attivo else 1.0
+            # il limite di accelerazione vale sempre, anche a controllo spento: l'inerzia e' una
+            # proprieta' del veicolo e non del controllo che lo comanda
+            fattore_velocita_rischio = limita_accelerazione(fattore_velocita_voluto, fattore_velocita_corrente)
+            fattore_velocita_corrente = fattore_velocita_rischio
             robot_x, robot_y, arrivato, passo_muro = passo_movimento(robot_x, robot_y, percorso, velocita_nominale_robot * fattore_velocita_rischio, meta_nodo, griglia_robot)
+            # controllo di posizione: si SOVRAPPONE al passo lungo il percorso, non lo sostituisce.
+            # sposta_con_vettore rifiuta da solo gli spostamenti che finirebbero dentro un muro
+            # la griglia e' quella GROSSA in entrambe le chiamate: sposta_con_vettore indicizza con
+            # DIM_NODO, e i muri sono gli stessi nelle due risoluzioni
+            if controllo_posizione_attivo:
+                scarto_x, scarto_y = offset_evitamento_predittivo(
+                    robot_x, robot_y, percorso, tracciamento_lidar, griglia)
+                robot_x, robot_y = sposta_con_vettore(robot_x, robot_y, scarto_x, scarto_y, 1.0, griglia)
             if passo_muro:
                 percorso = []  # il passo tagliava un muro: ricalcola subito
             if arrivato:
@@ -2220,10 +2506,10 @@ def main():
                 pygame.draw.rect(screen, GRIGIO_SCURO, (barra_x, cursore_y, 4, cursore_h))
 
             titolo = font.render("Pannello tecnico (TAB)", True, NERO)
-            screen.blit(titolo, (panel_rect.x + 15, panel_rect.y + 10))
+            screen.blit(titolo, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["titolo"]))
 
             vel_txt = font.render(f"Velocita simulazione: {moltiplicatore_velocita:.2f}x", True, NERO)
-            screen.blit(vel_txt, (panel_rect.x + 15, panel_rect.y + 45))
+            screen.blit(vel_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["vel_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_rect)
             rel = (moltiplicatore_velocita - VEL_MULT_MIN) / (VEL_MULT_MAX - VEL_MULT_MIN)
@@ -2231,7 +2517,7 @@ def main():
             pygame.draw.circle(screen, BLU, (handle_x, slider_rect.centery), 9)
 
             pers_txt = font.render("Persone:", True, NERO)
-            screen.blit(pers_txt, (panel_rect.x + 15, panel_rect.y + 105))
+            screen.blit(pers_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["persone_label"]))
 
             pygame.draw.rect(screen, BIANCO, numero_box_rect)
             pygame.draw.rect(screen, BLU if modificando_persone else GRIGIO, numero_box_rect, 2)
@@ -2240,7 +2526,7 @@ def main():
             screen.blit(numero_txt, (numero_box_rect.x + 8, numero_box_rect.y + 4))
 
             corridori_txt = font.render("Corridori:", True, NERO)
-            screen.blit(corridori_txt, (panel_rect.x + 15, panel_rect.y + 140))
+            screen.blit(corridori_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["corridori_label"]))
 
             pygame.draw.rect(screen, BIANCO, numero_corridori_box_rect)
             pygame.draw.rect(screen, BLU if modificando_corridori else GRIGIO, numero_corridori_box_rect, 2)
@@ -2249,7 +2535,7 @@ def main():
             screen.blit(numero_corridori_txt, (numero_corridori_box_rect.x + 8, numero_corridori_box_rect.y + 4))
 
             gruppi_txt = font.render("Gruppi:", True, NERO)
-            screen.blit(gruppi_txt, (panel_rect.x + 15, panel_rect.y + 175))
+            screen.blit(gruppi_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["gruppi_label"]))
 
             pygame.draw.rect(screen, BIANCO, numero_gruppi_box_rect)
             pygame.draw.rect(screen, BLU if modificando_gruppi else GRIGIO, numero_gruppi_box_rect, 2)
@@ -2258,7 +2544,7 @@ def main():
             screen.blit(numero_gruppi_txt, (numero_gruppi_box_rect.x + 8, numero_gruppi_box_rect.y + 4))
 
             ferme_txt = font.render("Persone ferme:", True, NERO)
-            screen.blit(ferme_txt, (panel_rect.x + 15, panel_rect.y + 210))
+            screen.blit(ferme_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["ferme_label"]))
 
             pygame.draw.rect(screen, BIANCO, numero_ferme_box_rect)
             pygame.draw.rect(screen, BLU if modificando_persone_ferme else GRIGIO, numero_ferme_box_rect, 2)
@@ -2267,9 +2553,7 @@ def main():
             screen.blit(numero_ferme_txt, (numero_ferme_box_rect.x + 8, numero_ferme_box_rect.y + 4))
 
             sicurezza_txt = font.render(f"Zona sicurezza: raggio {raggio_sicurezza * CM_PER_PIXEL:.0f} cm", True, NERO)
-            screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + 245))
-            pygame.draw.rect(screen, ROSSO if sicurezza_attiva else BIANCO, checkbox_sicurezza_rect)
-            pygame.draw.rect(screen, NERO, checkbox_sicurezza_rect, 2)
+            screen.blit(sicurezza_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["sicurezza_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_sicurezza_rect)
             rel_sic = (raggio_sicurezza - RAGGIO_SICUREZZA_MIN) / (RAGGIO_SICUREZZA_MAX - RAGGIO_SICUREZZA_MIN)
@@ -2277,7 +2561,7 @@ def main():
             pygame.draw.circle(screen, ROSSO, (handle_sic_x, slider_sicurezza_rect.centery), 9)
 
             robot_txt = font.render(f"Ingombro robot: {2 * raggio_robot * CM_PER_PIXEL:.0f} cm", True, NERO)
-            screen.blit(robot_txt, (panel_rect.x + 15, panel_rect.y + 320))
+            screen.blit(robot_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["robot_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_robot_rect)
             rel_robot = (raggio_robot - RAGGIO_ROBOT_MIN) / (RAGGIO_ROBOT_MAX - RAGGIO_ROBOT_MIN)
@@ -2285,9 +2569,7 @@ def main():
             pygame.draw.circle(screen, BLU, (handle_robot_x, slider_robot_rect.centery), 9)
 
             lidar_txt = font.render(f"Raggio lidar: {raggio_lidar * CM_PER_PIXEL / 100:.2f} m", True, NERO)
-            screen.blit(lidar_txt, (panel_rect.x + 15, panel_rect.y + 395))
-            pygame.draw.rect(screen, COLORE_LIDAR if lidar_attivo else BIANCO, checkbox_lidar_rect)
-            pygame.draw.rect(screen, NERO, checkbox_lidar_rect, 2)
+            screen.blit(lidar_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["lidar_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_lidar_rect)
             rel_lidar = (raggio_lidar - RAGGIO_LIDAR_MIN) / (RAGGIO_LIDAR_MAX - RAGGIO_LIDAR_MIN)
@@ -2295,7 +2577,7 @@ def main():
             pygame.draw.circle(screen, COLORE_LIDAR, (handle_lidar_x, slider_lidar_rect.centery), 9)
 
             persona_txt = font.render(f"Ingombro persone: {2 * raggio_persona * CM_PER_PIXEL:.0f} cm", True, NERO)
-            screen.blit(persona_txt, (panel_rect.x + 15, panel_rect.y + 470))
+            screen.blit(persona_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["persona_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_persona_rect)
             rel_persona = (raggio_persona - RAGGIO_PERSONA_MIN) / (RAGGIO_PERSONA_MAX - RAGGIO_PERSONA_MIN)
@@ -2304,40 +2586,18 @@ def main():
 
             sottocelle_per_lato_mostrato = max(SOTTOCELLE_PER_LATO_MIN, round(definizione_ellissoidi))
             definizione_txt = font.render(f"Definizione ellissoidi: {sottocelle_per_lato_mostrato}x{sottocelle_per_lato_mostrato}", True, NERO)
-            screen.blit(definizione_txt, (panel_rect.x + 15, panel_rect.y + 545))
-            pygame.draw.rect(screen, COLORE_BLOB_PROBABILITA if ellissoidi_attivi else BIANCO, checkbox_ellissoidi_rect)
-            pygame.draw.rect(screen, NERO, checkbox_ellissoidi_rect, 2)
+            screen.blit(definizione_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["definizione_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_definizione_rect)
             rel_definizione = (definizione_ellissoidi - SOTTOCELLE_PER_LATO_MIN) / (SOTTOCELLE_PER_LATO_MAX - SOTTOCELLE_PER_LATO_MIN)
             handle_definizione_x = slider_definizione_rect.x + int(rel_definizione * slider_definizione_rect.width)
             pygame.draw.circle(screen, COLORE_BLOB_PROBABILITA, (handle_definizione_x, slider_definizione_rect.centery), 9)
 
-            ai_label = "AI di predizione" if modello_ai_disponibile else "AI di predizione - modello non trovato"
-            ai_txt = font.render(ai_label, True, NERO if modello_ai_disponibile else GRIGIO)
-            screen.blit(ai_txt, (panel_rect.x + 15, panel_rect.y + 610))
-            pygame.draw.rect(screen, VERDE if (ai_attiva and modello_ai_disponibile) else BIANCO, checkbox_ai_rect)
-            pygame.draw.rect(screen, NERO, checkbox_ai_rect, 2)
-
-            velocita_txt = font.render("Velocita' predittiva (incroci)", True, NERO)
-            screen.blit(velocita_txt, (panel_rect.x + 15, panel_rect.y + 647))
-            pygame.draw.rect(screen, VERDE if controllo_velocita_attivo else BIANCO, checkbox_velocita_rect)
-            pygame.draw.rect(screen, NERO, checkbox_velocita_rect, 2)
-
-            griglia_fine_txt = font.render(
-                f"Griglia fine robot ({dim_robot}px)" if griglia_fine_attiva else f"Griglia fine robot ({DIM_NODO}px)",
-                True, NERO)
-            screen.blit(griglia_fine_txt, (panel_rect.x + 15, panel_rect.y + 684))
-            pygame.draw.rect(screen, VERDE if griglia_fine_attiva else BIANCO, checkbox_griglia_fine_rect)
-            pygame.draw.rect(screen, NERO, checkbox_griglia_fine_rect, 2)
-
             # planimetria: trasparenza e allineamento, attivi solo in modalita' Povo (tasto P)
             planimetria_caricata = modalita_povo and planimetria_originale is not None
             planimetria_label = f"Planimetria: {int(alpha_planimetria)}" if planimetria_caricata else "Planimetria (P per la mappa Povo)"
             planimetria_txt = font.render(planimetria_label, True, NERO if planimetria_caricata else GRIGIO_SCURO)
-            screen.blit(planimetria_txt, (panel_rect.x + 15, panel_rect.y + 721))
-            pygame.draw.rect(screen, ARANCIONE if (planimetria_visibile and planimetria_caricata) else BIANCO, checkbox_planimetria_rect)
-            pygame.draw.rect(screen, NERO, checkbox_planimetria_rect, 2)
+            screen.blit(planimetria_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["planimetria_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_planimetria_rect)
             rel_planimetria = (alpha_planimetria - ALPHA_PLANIMETRIA_MIN) / (ALPHA_PLANIMETRIA_MAX - ALPHA_PLANIMETRIA_MIN)
@@ -2347,7 +2607,40 @@ def main():
             allineamento_txt = font_piccolo.render(
                 f"scala {scala_planimetria_x:.2f}x{scala_planimetria_y:.2f}  offset {int(offset_planimetria_x)},{int(offset_planimetria_y)} px"
                 "  (frecce / PagSu-PagGiu)", True, GRIGIO_SCURO)
-            screen.blit(allineamento_txt, (panel_rect.x + 15, panel_rect.y + 770))
+            screen.blit(allineamento_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["allineamento"]))
+
+            # --- interruttori, tutti insieme e in un elenco solo: ordine e spaziatura stanno qui,
+            # le posizioni vengono dal layout, quindi non possono accavallarsi con i cursori sopra
+            intestazione_txt = font.render("Interruttori", True, GRIGIO_SCURO)
+            screen.blit(intestazione_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["intestazione_caselle"]))
+            pygame.draw.line(screen, GRIGIO,
+                             (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["intestazione_caselle"] + 22),
+                             (panel_rect.x + panel_w - 15, panel_rect.y + Y_PANNELLO["intestazione_caselle"] + 22))
+
+            griglia_label = (f"Griglia fine robot ({dim_robot}px)" if griglia_fine_attiva
+                             else f"Griglia fine robot ({DIM_NODO}px)")
+            interruttori = (
+                ("Arresto di sicurezza", checkbox_sicurezza_rect, sicurezza_attiva, ROSSO, True),
+                ("Lidar", checkbox_lidar_rect, lidar_attivo, COLORE_LIDAR, True),
+                ("Macchia di probabilita'", checkbox_ellissoidi_rect, ellissoidi_attivi,
+                 COLORE_BLOB_PROBABILITA, True),
+                ("AI di predizione" if modello_ai_disponibile else "AI di predizione - modello non trovato",
+                 checkbox_ai_rect, ai_attiva and modello_ai_disponibile, VERDE, modello_ai_disponibile),
+                ("Velocita' predittiva (incroci)", checkbox_velocita_rect, controllo_velocita_attivo,
+                 VERDE, True),
+                ("Strada libera al massimo", checkbox_strada_libera_rect,
+                 strada_libera_attiva and controllo_velocita_attivo, VERDE, controllo_velocita_attivo),
+                ("Posizione predittiva (schivata)", checkbox_posizione_rect, controllo_posizione_attivo,
+                 VERDE, True),
+                (griglia_label, checkbox_griglia_fine_rect, griglia_fine_attiva, VERDE, True),
+                ("Mostra planimetria", checkbox_planimetria_rect,
+                 planimetria_visibile and planimetria_caricata, ARANCIONE, planimetria_caricata),
+            )
+            for etichetta_interruttore, rett, acceso, colore_acceso, abilitato in interruttori:
+                testo = font.render(etichetta_interruttore, True, NERO if abilitato else GRIGIO)
+                screen.blit(testo, (panel_rect.x + 15, rett.y))
+                pygame.draw.rect(screen, colore_acceso if acceso else BIANCO, rett)
+                pygame.draw.rect(screen, NERO, rett, 2)
 
             # pulsanti che salvano, ricaricano o azzerano su disco la configurazione del pannello
             pygame.draw.rect(screen, VERDE, button_salva_config_rect)
@@ -2369,7 +2662,7 @@ def main():
                 configurazione_salvataggio_timer -= 1
                 testo_messaggio, colore_messaggio = configurazione_messaggio
                 conferma_txt = font_piccolo.render(testo_messaggio, True, colore_messaggio)
-                screen.blit(conferma_txt, (panel_rect.x + 15, panel_rect.y + 692))
+                screen.blit(conferma_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["messaggio"]))
 
         totale_persone_simulazione = len(persone) + len(corridori) + len(persone_ferme) + sum(len(g["membri"]) for g in gruppi)
         contatore_persone_txt = font.render(f"Persone in simulazione: {totale_persone_simulazione}", True, NERO)

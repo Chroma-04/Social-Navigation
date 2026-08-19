@@ -70,18 +70,36 @@ MAPPA_DEFAULT = "training_mappa_01"
 # le misure gia' fatte cambierebbero significato senza che si veda dal codice del confronto.
 FATTORE_GRIGLIA_DEFAULT = 1
 REPLICHE = 8          # gruppi appaiati (stesso seed, tutte le condizioni) per ogni livello di popolazione
-FRAME_MAX = max(1, 9000 // ACCELERAZIONE)  # 150s equivalenti: oltre, la corsa conta come "non arrivata" invece di proseguire all'infinito
+# 450s equivalenti: oltre, la corsa conta come "non arrivata" invece di proseguire all'infinito.
+# Il limite era 150s quando il robot viaggiava a 3,0 m/s e la traversata ne richiedeva ~50. Con la
+# velocita' portata al valore realistico di 1,0 m/s i tempi triplicano e 150s li taglierebbe tutti:
+# il tetto va scalato con la velocita', altrimenti smette di essere una salvaguardia contro le corse
+# infinite e diventa un filtro sulle corse normali.
+FRAME_MAX = max(1, 27000 // ACCELERAZIONE)
 
 # --- DISEGNO FATTORIALE 2x2 ---
 # I due componenti aggiunti dalla tesi sono indipendenti e vanno misurati separatamente: accendendoli
 # insieme si ottiene un saldo unico, e se uno aiuta mentre l'altro danneggia non si puo' capire quale sia
 # quale. Qui ogni combinazione gira sullo STESSO seed, quindi i confronti sono tutti appaiati fra loro.
 #   nome -> (usa correzione AI sulla mappa di costo, usa controllo predittivo di velocita')
+# (correzione AI, controllo di velocita', controllo di posizione, strada libera al massimo).
+# Le prime quattro voci sono quelle su cui poggia il capitolo 5 e i loro nomi non vanno cambiati:
+# li usano i CSV gia' prodotti
 CONDIZIONI = {
-    "base": (False, False),        # il robot ante-tesi: solo Kalman, velocita' costante
-    "solo_ai": (True, False),      # correzione AI sulla macchia di probabilita', velocita' costante
-    "solo_velocita": (False, True), # velocita' predittiva sopra al Kalman puro, senza correzione AI
-    "completo": (True, True),      # entrambi
+    "base": (False, False, False, False),          # il robot ante-tesi: solo Kalman, velocita' costante
+    "solo_ai": (True, False, False, False),        # correzione AI sulla macchia, velocita' costante
+    "solo_velocita": (False, True, False, False),  # velocita' predittiva sopra al Kalman puro
+    "completo": (True, True, False, False),        # AI + velocita'
+    # controllo di POSIZIONE: trasla il robot di lato per aggirare le persone invece di rallentare.
+    # Va misurato da solo prima che in combinazione, per non confondere i due contributi
+    "solo_posizione": (False, False, True, False),
+    "velocita_posizione": (False, True, True, False),
+    "completo_posizione": (True, True, True, False),
+    # STRADA LIBERA AL MASSIMO: il controllo di velocita' punta a non avere nessuno davanti e a
+    # correre quando non c'e', invece di limitarsi a frenare. Cambia il regime neutro da 1.0 al
+    # massimo della banda, quindi va confrontato con solo_velocita e non solo con base
+    "velocita_libera": (False, True, False, True),
+    "libera_posizione": (False, True, True, True),
 }
 CONDIZIONE_RIFERIMENTO = "base"
 # Per la diagnosi non servono tutti gli 11 livelli: bastano pochi livelli rappresentativi con abbastanza
@@ -201,7 +219,7 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed, fattore_griglia=FATT
 
     Ritorna (arrivato, frame_impiegati, frame_fermo_sicurezza); frame_impiegati vale FRAME_MAX se non e'
     arrivato entro il tetto."""
-    usa_ai, usa_velocita = CONDIZIONI[condizione]
+    usa_ai, usa_velocita, usa_posizione, strada_libera = CONDIZIONI[condizione]
     if usa_ai and _modello_ai_worker is None:
         _inizializza_worker()  # chiamata diretta fuori dal pool (test manuali): l'inizializzatore non e' mai girato
     modello_ai = _modello_ai_worker if usa_ai else None
@@ -287,6 +305,9 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed, fattore_griglia=FATT
 
     costi = {}
     frame_fermo = 0
+    # velocita' corrente come frazione della nominale. Parte da zero perche' il robot parte da fermo:
+    # con i limiti di accelerazione di main.py la partenza costa, esattamente come ogni ripartenza
+    fattore_corrente = 0.0
     for contatore_frame in range(FRAME_MAX):
         robot_x, robot_y = robot["x"], robot["y"]
 
@@ -349,17 +370,30 @@ def esegui_corsa(nome_mappa, condizione, popolazione, seed, fattore_griglia=FATT
         if raggio_sicurezza > 0 and any(math.hypot(robot["x"] - p["x"], robot["y"] - p["y"]) < raggio_sicurezza
                                         for p in tutte_mobili):
             frame_fermo += 1
+            fattore_corrente = 0.0  # arresto d'emergenza: la ripartenza paga l'intera rampa
             continue
 
-        fattore = 1.0
+        fattore_voluto = 1.0
         if usa_velocita:
-            fattore = sim.fattore_velocita_da_conflitto(
+            fattore_voluto = sim.fattore_velocita_da_conflitto(
                 robot["x"], robot["y"], robot["percorso"], tracciamento_lidar, velocita_nominale,
-                raggio_robot, raggio_persona)
+                raggio_robot, raggio_persona, strada_libera_al_massimo=strada_libera)
+        # il limite di accelerazione vale in ENTRAMBE le condizioni: l'inerzia e' una proprieta' del
+        # veicolo, non del controllo. Un passo di simulazione vale ACCELERAZIONE fotogrammi reali
+        fattore = sim.limita_accelerazione(fattore_voluto, fattore_corrente, ACCELERAZIONE)
+        fattore_corrente = fattore
 
         x, y, arrivato, bloccato = sim.passo_movimento(robot["x"], robot["y"], robot["percorso"],
                                                        velocita_nominale * fattore, arrivo_robot, griglia_robot)
         robot["x"], robot["y"] = x, y
+        # controllo di posizione: si SOVRAPPONE al passo lungo il percorso invece di sostituirlo.
+        # La griglia e' quella grossa perche' sposta_con_vettore indicizza con DIM_NODO; i muri
+        # sono gli stessi nelle due risoluzioni. Un passo vale ACCELERAZIONE fotogrammi reali
+        if usa_posizione:
+            scarto_x, scarto_y = sim.offset_evitamento_predittivo(
+                robot["x"], robot["y"], robot["percorso"], tracciamento_lidar, griglia, ACCELERAZIONE)
+            robot["x"], robot["y"] = sim.sposta_con_vettore(robot["x"], robot["y"],
+                                                            scarto_x, scarto_y, 1.0, griglia)
         if bloccato:
             robot["percorso"] = []
         if arrivato:

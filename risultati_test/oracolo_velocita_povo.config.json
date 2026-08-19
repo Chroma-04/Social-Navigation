@@ -1,0 +1,80 @@
+{
+  "comando": "ai_controllo/misura_oracolo.py",
+  "commit_git": "a4c8b82+modifiche-non-committate",
+  "scala": {
+    "dim_nodo_px": 30,
+    "metri_per_cella": 1.0,
+    "cm_per_pixel": 3.3333
+  },
+  "velocita_m_s": {
+    "robot_crociera": 1.0,
+    "robot_minima": 0.2,
+    "robot_massima": 2.0,
+    "pedone": 1.0,
+    "corridore": 2.0
+  },
+  "limiti_dinamici_m_s2": {
+    "accelerazione": 0.5,
+    "decelerazione": 1.0
+  },
+  "geometria_px": {
+    "raggio_robot": 7,
+    "raggio_persona": 8,
+    "raggio_sicurezza": 12,
+    "raggio_lidar": 120,
+    "da_config_pannello": {
+      "raggio_sicurezza": 10.058823529411764,
+      "raggio_robot": 5.705882352941177,
+      "raggio_persona": 6.952941176470588,
+      "raggio_lidar": 122.6470588235294
+    }
+  },
+  "controllo_velocita": {
+    "lookahead_px": 150,
+    "margine_conflitto_px": 6,
+    "frame_reazione": 90,
+    "fattore_min": 0.2,
+    "fattore_max": 2.0
+  },
+  "controllo_posizione": {
+    "raggio_manovra_px": 30,
+    "previsione_frame": 60,
+    "sigma_repulsione_px": 30,
+    "peso_ritorno_percorso": 0.6,
+    "velocita_laterale_max_m_s": 0.5,
+    "raggio_interesse_px": 120
+  },
+  "simulazione": {
+    "accelerazione_passo": 5,
+    "frame_max": 5400,
+    "fattore_griglia_robot": 1
+  },
+  "esperimento": {
+    "popolazione_base": {
+      "numero_persone": 120,
+      "numero_corridori": 18,
+      "numero_persone_ferme": 116,
+      "numero_gruppi": 27
+    },
+    "fattori_densita": [
+      0.15,
+      0.3,
+      0.45,
+      0.6,
+      0.75,
+      0.9,
+      1.05,
+      1.2
+    ],
+    "semi": [
+      894407369,
+      1112056415,
+      3678532581
+    ],
+    "condizioni": [
+      "base",
+      "velocita_libera",
+      "oracolo"
+    ]
+  }
+}

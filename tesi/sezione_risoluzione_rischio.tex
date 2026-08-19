@@ -1,0 +1,115 @@
+% Ultima sezione del capitolo 3, dopo 3.2 (Gestione dell'incertezza sul moto delle persone).
+% Non richiede rinumerazioni: 3.2.3 resta 3.2.3 e i rimandi esistenti continuano a valere.
+% Riferimenti al codice: main.py, macchia_diffusione() e il blocco di aggregazione nel ciclo
+% principale; costanti RAGGIO_BLOB_CELLE, DECADIMENTO_BLOB, COSTO_MASSIMO_PROBABILITA.
+
+\subsection{Ottimizzazione della definizione delle regioni di rischio}
+\label{sec:risoluzione-rischio}
+
+La costruzione presentata in \S\ref{sec:aree-probabilita} lascia aperta una scelta che incide
+sul risultato più di quanto la formulazione suggerisca, e che costituisce un compromesso fra
+due grandezze in conflitto: la fedeltà geometrica con cui la regione di rischio è
+rappresentata e il costo computazionale della ricerca del percorso. Entrambe dipendono dalla
+risoluzione della griglia, ma in versi opposti, sicché adottare un'unica griglia per l'una e
+per l'altra obbligherebbe a sacrificare la prima in favore della seconda o viceversa.
+
+La ricerca del percorso preferisce celle grandi. Il costo della pianificazione cresce
+approssimativamente con il cubo dell'inverso del passo, poiché dimezzare il lato della cella
+quadruplica i nodi da espandere e raddoppia i campioni richiesti da ciascun controllo di
+visibilità, che è l'operazione dominante del pianificatore. La regione di rischio richiede
+invece celle piccole, essendo un oggetto geometrico: si allunga lungo la direzione di marcia,
+si piega attorno agli spigoli e si restringe in corrispondenza dei varchi. Ciascuna di queste
+proprietà è rappresentabile soltanto se la regione è descritta da un numero sufficiente di
+celle; su una griglia dal passo confrontabile con l'ingombro di una persona l'anisotropia
+degenera e la deformazione attorno a un angolo si riduce a un gradino.
+
+L'ottimizzazione consiste nel disaccoppiare le due risoluzioni anziché mediarle. La macchia
+viene propagata su una \textbf{sotto-griglia} di lato $\ell/k$, con $\ell$ il lato della cella
+di pianificazione e $k$ intero, e il risultato è aggregato sulla griglia di pianificazione
+prima che il pianificatore lo consumi. Il valore di $k$ è vincolato a essere multiplo del
+rapporto fra le due griglie, cosicché l'aggregazione sia una divisione intera priva di resto e
+nessuna sotto-cella ricada a cavallo di due celle di decisione.
+
+Ne risulta un'architettura a due risoluzioni con ruoli distinti: una griglia uniforme e
+relativamente grossolana per la \emph{decisione}, che ne determina il costo computazionale, e
+una risoluzione locale e più fine per la \emph{rappresentazione del rischio}, che ne determina
+la fedeltà geometrica. Perché tale separazione sia legittima devono però valere tre proprietà,
+verificate nel seguito: che il raffinamento non alteri la regione che descrive, che
+l'aggregazione non introduca a sua volta una dipendenza dalla risoluzione, e che il costo
+aggiuntivo non ricada sulla componente che già domina il bilancio di calcolo.
+
+\subsubsection{Invarianza della forma rispetto al raffinamento}
+
+Il raffinamento deve modificare la fedeltà con cui la regione è descritta, non la regione
+stessa: diversamente $k$ diventerebbe una seconda manopola sull'estensione del rischio, e non
+sarebbe più possibile variarlo senza alterare al tempo stesso il comportamento del sistema.
+
+Si è pertanto imposto che il raggio di propagazione, espresso in sotto-celle, scali con $k$, e
+che il decadimento per sotto-cella valga $\delta^{1/k}$. La seconda condizione discende
+direttamente dalla proprietà moltiplicativa stabilita in \S\ref{sec:aree-probabilita}: poiché
+il peso di una cella è il prodotto dei decadimenti dei passi che vi conducono, elevare il
+fattore all'inverso di $k$ compensa esattamente il numero $k$ volte maggiore di passi
+necessari a percorrere la medesima distanza.
+
+L'estensione fisica della regione e il decadimento per unità di lunghezza restano dunque
+immutati al variare di $k$: raffinando si ottiene la stessa macchia descritta meglio, non una
+macchia diversa. Il parametro governa esclusivamente la risoluzione della rappresentazione, e
+può essere variato senza che alcun altro comportamento del sistema ne risulti alterato.
+
+\subsubsection{Aggregazione per massimo}
+
+A ciascuna cella di pianificazione è attribuito il \emph{massimo} fra i pesi delle sotto-celle
+che la compongono, e non la loro somma né la loro media. Le due alternative sono state
+scartate per ragioni distinte.
+
+La somma renderebbe la penalità dipendente da $k$, poiché il numero di addendi cresce con
+$k^2$: raffinare la rappresentazione equivarrebbe ad aumentare la prudenza del robot, due
+effetti che devono restare distinti se si vuole poter variare l'uno senza l'altro. La media
+diluirebbe invece un picco genuino nel volume della cella che lo contiene, attenuando proprio
+la porzione di regione che il robot deve evitare: una sotto-cella a rischio elevato circondata
+da sotto-celle libere produrrebbe una cella di costo modesto, e il pianificatore
+l'attraverserebbe.
+
+Il massimo conserva la lettura conservativa — il punto peggiore che il robot incontrerebbe
+attraversando quella cella — ed è indipendente dalla risoluzione. Per la medesima ragione il
+costo massimo associato al peso unitario è riscalato con il lato della cella: la penalità
+accumulata percorrendo una data distanza non deve dipendere da come quella distanza è stata
+suddivisa.
+
+\subsubsection{Sostenibilità del costo computazionale}
+
+Il beneficio di questa separazione non sarebbe interessante se il suo costo ricadesse sulla
+ricerca del percorso, che domina il bilancio di calcolo. Non è così, per due ragioni.
+
+La prima è che il pianificatore continua a operare sulla propria griglia: riceve una mappa di
+costo indicizzata come prima dell'introduzione della sotto-griglia, e il numero di nodi che
+espande non cambia. L'onere della ricerca — e con esso il controllo di visibilità che ne
+costituisce la quasi totalità — resta quindi quello determinato dalla sola griglia di
+pianificazione.
+
+La seconda è che la propagazione raffinata è \emph{locale} per costruzione: si sviluppa
+attorno a ciascuna persona rilevata, entro un raggio limitato e con interruzione al di sotto
+di una soglia di peso trascurabile. Il suo costo è pertanto proporzionale al numero di persone
+percepite, e non all'estensione dell'ambiente. Il raffinamento si paga dunque soltanto dove
+serve, nell'intorno dei corpi osservati, mentre lo spazio libero — che costituisce la maggior
+parte della mappa e sul quale non vi è alcun rischio da rappresentare — resta descritto alla
+risoluzione grossolana che al pianificatore è sufficiente.
+
+\subsubsection{Limite del beneficio e configurazione impiegata}
+
+Il collasso della sotto-griglia sulla griglia di pianificazione merita di essere sottolineato,
+poiché delimita l'ambito del beneficio ottenibile per questa via. Raffinare la
+rappresentazione rende la regione di rischio geometricamente più fedele, ma non abbassa la
+risoluzione alla quale il pianificatore decide, che resta quella della propria griglia.
+
+Ne segue che l'ottimizzazione qui descritta migliora la qualità dell'informazione trasmessa e
+non la finezza con cui essa può essere utilizzata. La distinzione risulterà determinante
+nell'analisi condotta in \S\ref{sec:dove-si-arresta}, dove si mostra che il guadagno di
+un'informazione più accurata si trasferisce alla decisione soltanto nella misura in cui supera
+la risoluzione alla quale la decisione è presa: soglia che il raffinamento della sola
+rappresentazione non sposta.
+
+Va infine precisato, per la corretta lettura del capitolo successivo, che le campagne di
+misura ivi riportate sono state eseguite con $k=1$, ossia con sotto-celle coincidenti con le
+celle di pianificazione. Il meccanismo descritto appartiene dunque al sistema realizzato ma
+non è esercitato da quei dati, e nessuna delle differenze misurate gli è attribuibile.

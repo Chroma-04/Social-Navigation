@@ -1,0 +1,582 @@
+================================================================================
+CAPITOLO SUL CONTROLLO DI VELOCITA' - REGISTRO DEI DATI
+================================================================================
+Aggiornato: 18 agosto 2026
+
+A COSA SERVE QUESTO FILE. E' il registro unico di tutto cio' che e' stato provato
+sul controllo di velocita' e sul controllo di posizione: quali esperimenti sono
+stati fatti, con quale configurazione del simulatore, che numeri sono usciti e in
+quale file stanno. Quando si scrive il capitolo, i numeri si prendono da qui e non
+dalla memoria. Va aggiornato a ogni misura nuova.
+
+Il resto delle modifiche al progetto sta in tesi/report_modifiche.txt. Qui stanno
+solo velocita' e posizione.
+
+
+================================================================================
+1. LE TRE CONFIGURAZIONI DEL SIMULATORE
+================================================================================
+I dati NON sono confrontabili fra configurazioni diverse. Prima di usare un numero
+va controllato da quale viene.
+
+C1 - CINEMATICA VECCHIA (fino al 17 agosto)
+    robot 3,0 m/s, pedoni 2,0 m/s, corridori 4,0 m/s
+    nessun limite di accelerazione: fermarsi non costava nulla
+    banda del controllo 0,35-1,25
+    corridori 48% dei corpi mobili
+    Fuori scala: un pedone a 2 m/s cammina come un maratoneta.
+
+C2 - CINEMATICA REALISTICA (17-18 agosto)
+    robot 1,0 m/s (banda 0,2-2,0), pedoni 1,2 m/s, corridori 2,4 m/s
+    accelerazione 0,5 m/s2, decelerazione 1,0 m/s2
+    corridori 48% dei corpi mobili
+    Il robot e' PIU' LENTO della folla: rapporto 0,83.
+
+C3 - CONFIGURAZIONE ATTUALE (dal 18 agosto)
+    robot 1,0 m/s (banda 0,2-2,0), pedoni 1,0 m/s, corridori 2,0 m/s
+    accelerazione 0,5 m/s2, decelerazione 1,0 m/s2
+    corridori 13% dei corpi mobili (120 camminatori + 18 corridori)
+    totale popolazione 281 invariato, quindi le etichette pop42..pop422 e le
+    densita' restano le stesse di C2: cambia il mescolamento, non la numerosita'
+    Il robot tiene il passo della folla in crociera e la supera in punta.
+
+GEOMETRIA (comune a tutte): 1 cella = 1 m = 30 px, quindi 3,33 cm/px.
+    ATTENZIONE: i raggi NON sono le costanti di main.py. t._geometria_salvata()
+    legge config_pannello.json e le sovrascrive. Valori realmente in uso:
+        raggio robot        19,0 cm   (la costante direbbe 23)
+        raggio persona      23,2 cm   (la costante direbbe 27)
+        raggio sicurezza    33,5 cm   (la costante direbbe 40)
+        soglia di conflitto 62,2 cm   (la costante direbbe 70)
+        raggio lidar         4,09 m
+    Il 62 cm coincide con quanto gia' scritto in tesi: il valore giusto e' sempre
+    stato quello. Da qui in avanti ogni CSV salva accanto a se' la configurazione
+    (vedi sezione 6).
+
+
+================================================================================
+2. I COMPONENTI IN GIOCO
+================================================================================
+
+CONTROLLO DI VELOCITA' CLASSICO (main.py, fattore_velocita_da_conflitto)
+    Proietta le persone tracciate col Kalman e cerca conflitti LUNGO IL PERCORSO
+    entro 5 m, con soglia 62 cm. Tre esiti: nessun conflitto -> 1,0; conflitto
+    evitabile sprintando -> massimo; conflitto inevitabile -> rallenta in
+    proporzione all'urgenza. Il minimo e' 0,20: non ferma mai il robot.
+
+CONTROLLO DI VELOCITA' "STRADA LIBERA AL MASSIMO" (flag strada_libera_al_massimo)
+    Stessa funzione, ordine dei rami invertito. Nella versione classica, se non
+    c'era conflitto a velocita' nominale si usciva subito con 1,0: il ramo del
+    massimo era IRRAGGIUNGIBILE a strada libera, e si attivava solo per sfilare
+    davanti a qualcuno. Il robot non usava quindi mai la banda alta per il motivo
+    per cui esiste. Qui l'obiettivo si ribalta: se nemmeno andando al massimo si
+    incontra qualcuno, si va al massimo.
+
+CONTROLLO DI POSIZIONE (main.py, offset_evitamento_predittivo)
+    Strato reattivo sopra Theta*, che continua a scegliere il percorso sui costi
+    di cella. Proietta le persone a 0, 0,5 e 1 s, valuta 17 posizioni candidate in
+    un disco di 1 m attorno al robot, e per ognuna somma una campana di repulsione
+    per persona e per istante - la sovrapposizione degli effetti - piu' un termine
+    che penalizza lo scostamento dal percorso. Scarta i candidati dentro un muro e
+    si muove verso il migliore a non piu' di 0,5 m/s laterali.
+    Campionamento e non gradiente: fra due persone un gradiente si ferma nel minimo
+    in mezzo, il campionamento sceglie da che parte passare.
+
+ARRESTO DI SICUREZZA (main.py e testing.py, stesso codice)
+    Scatta a 33,5 cm IN OGNI DIREZIONE su qualunque corpo mobile. NON e' parte del
+    controllo di velocita': e' il meccanismo che produce le fermate, ed e' separato.
+
+
+================================================================================
+3. ESPERIMENTI ESEGUITI, IN ORDINE
+================================================================================
+
+--------------------------------------------------------------------------------
+E1. CONTROLLO CLASSICO SU C1 (cinematica vecchia)
+    banco  ibridazione_velocita/performance_velocita_classico.py
+    dati   risultati_test/velocita_classico_povo_sweep_cinematica_vecchia.csv
+    10 livelli x 5 semi = 50 coppie appaiate, base vs solo_velocita
+
+    tempo percorrenza   +18,4%   rapporto 7,69   0/10 livelli   p 0,002  PEGGIORA
+    tempo fermo          +3,1%   rapporto 0,37                           nullo
+    numero fermate      -10,6%   rapporto 1,47                           nullo
+    frenata nel 32,3% dei fotogrammi, sprint nel 2,9%
+
+    LETTURA: il componente si comporta come un freno puro. E' il risultato piu'
+    solido di tutta la serie, ed e' negativo: peggiora il tempo in TUTTI e dieci i
+    livelli, 45 coppie perse su 50.
+
+--------------------------------------------------------------------------------
+E2. CONTROLLO CLASSICO SU C2 (cinematica realistica)
+    banco  ibridazione_velocita/performance_velocita_classico.py
+    dati   risultati_test/velocita_classico_povo_sweep.csv
+    10 livelli x 5 semi = 50 coppie, 100 corse in 87 minuti
+
+    tempo percorrenza    +2,4%   rapporto 1,62   4/10   p 0,75   nullo
+    tempo fermo          +3,3%   rapporto 0,56   4/10            nullo
+    numero fermate       -1,9%   rapporto 0,29   4/10            nullo
+    distanza persone    +0,04 m  rapporto 0,61   6/10            nullo
+    velocita' media      -3,3%
+    frenata nel 12,4% dei fotogrammi, sprint nel 7,4%
+
+    LETTURA: IL COSTO E' SCOMPARSO, il beneficio no. Da dannoso a inutile. La banda
+    0,2-2,0 gli ha dato autorita' di accelerare e ha smesso di essere un freno puro.
+    Limite superiore: i dati escludono una riduzione delle fermate oltre il 14%.
+
+    NON USARE pop337 come risultato: -32,4% fermate con rapporto 2,76 e 5 coppie su
+    5, ma su C1 lo stesso livello dava rapporto 0,21. Non replica, ed e' quanto il
+    caso produce guardando dieci livelli.
+
+--------------------------------------------------------------------------------
+E3. DIAGNOSI DEGLI ARRESTI (su C2)
+    banco  ibridazione_velocita/diagnosi_fermate.py
+    3 livelli x 3 semi x 2 condizioni, 674 arresti classificati
+
+    frontali (entro 45 gradi dalla marcia)   324   48%
+    laterali (45-135 gradi)                  279   41%
+    posteriori (oltre 135 gradi)              71   11%
+    varco libero perpendicolare, medio            ~307 cm
+    arresti in spazi stretti (meno di 1 m)    37    5%
+
+    LETTURA: due meta' con cause diverse. Il 52% non frontale il controllo di
+    velocita' non poteva vederlo, perche' proietta i conflitti solo lungo il
+    percorso. Il 48% frontale lo stava guardando e non l'ha evitato, perche'
+    RALLENTARE NON CREA DISTANZA: la persona continua ad avvicinarsi e il minimo
+    del controllo e' 0,20. Frenare rimanda l'arresto, non lo evita.
+
+    Il varco medio di 3 m e il 5% in spazi stretti dicono che lo spazio per una
+    traslazione laterale c'e' nel 95% dei casi: e' cio' che rende praticabile il
+    controllo di posizione.
+
+--------------------------------------------------------------------------------
+E4. SMOKE TEST DELLE CINQUE CONDIZIONI (su C3, un solo seme, pop169)
+    Nessun valore statistico: serviva a verificare che il codice nuovo giri e a
+    vedere il verso. Tutte le condizioni arrivano, nessuna corsa fallita a 2 m/s.
+
+    base                 147,1 s   fermo 8,9 s
+    solo_velocita        150,6 s   fermo 8,8 s     +2,4% tempo
+    velocita_libera      122,1 s   fermo 5,5 s    -17,0% tempo, -38% fermo
+    solo_posizione       165,9 s   fermo 7,4 s    +12,8% tempo, -17% fermo
+    libera_posizione     119,1 s   fermo 6,3 s    -19,0% tempo, -29% fermo
+
+--------------------------------------------------------------------------------
+E5. VELOCITA' LIBERA + POSIZIONE contro base (su C3)
+    banco  ibridazione_velocita/confronto_controlli.py --rapido
+    dati   risultati_test/confronto_controlli_povo_libera_posizione.csv
+    10 livelli x 1 seme diverso per livello = 10 coppie
+
+    tempo percorrenza   +1,1 s    rapporto 0,13   4/10   nullo
+    tempo fermo         -1,3 s    rapporto 1,10   5/10   nullo
+    numero fermate      -3,3      rapporto 1,07   5/10   nullo
+    distanza persone   +0,28 m    rapporto 1,20   5/10   nullo
+    velocita' media    +0,105 m/s rapporto 3,01   9/10   p 0,022   MIGLIORA
+
+    LETTURA: va piu' veloce e NON arriva prima. Percorre piu' strada alla velocita'
+    piu' alta: e' la firma del controllo di posizione, che devia e allunga. La
+    velocita' guadagnata viene spesa in metri invece che in secondi.
+
+    I +0,28 m di distanza NON sono utilizzabili: vengono quasi tutti da pop42, che
+    da solo vale +2,17 m. Tolto quel livello restano 7,7 cm. A pop42 ci sono 42
+    persone in tutta la mappa e la distanza dal piu' vicino e' enorme e ballerina.
+    Da pop253 in su il segno e' quasi sempre negativo: alle densita' alte il
+    controllo tiene MENO distanza, coerente con lo spazio che si chiude.
+
+--------------------------------------------------------------------------------
+E6. SOLO VELOCITA' LIBERA contro base (su C3) - PRIMA PROVA
+    banco  ibridazione_velocita/confronto_controlli.py --rapido --variante=velocita_libera
+    dati   risultati_test/confronto_rapido_velocita_libera_ricostruito.csv (PARZIALE)
+    10 livelli x 1 seme diverso per livello = 10 coppie
+
+    tempo percorrenza  -12,3 s    rapporto 2,73   8/10   p 0,109   MIGLIORA
+    velocita' media    +0,105 m/s rapporto 2,85   9/10   p 0,022   MIGLIORA
+    tempo fermo         +1,35 s   rapporto 1,11   3/10   nullo, verso peggiorativo
+    numero fermate      -1,3      rapporto 0,72   5/10   nullo
+    distanza persone   -0,04 m    rapporto 0,18   3/10   nullo
+
+    differenze per livello (variante - base):
+      pop42   -5,2 s   fermo +1,5   fermate  +2
+      pop84  -17,0     fermo -0,5   fermate   0
+      pop126 -40,0     fermo -6,4   fermate -12
+      pop169 +33,3     fermo +3,8   fermate +15
+      pop211 -39,5     fermo -5,2   fermate -11
+      pop253  +9,4     fermo +1,4   fermate  -8
+      pop295  +4,6     fermo +0,3   fermate  +6
+      pop337 +24,0     fermo -2,8   fermate  -7
+      pop379 +36,0     fermo +1,8   fermate   0
+      pop422  +5,7     fermo -7,3   fermate -18
+
+    LETTURA: primo effetto STABILITO della serie, e stavolta la velocita' guadagnata
+    si converte in secondi - conferma che era il controllo di posizione ad allungare
+    il percorso in E5. Ma non tocca fermate, tempo fermo e distanza.
+    L'effetto e' DISOMOGENEO: vince dove c'e' spazio, perde in folla. Riportare la
+    media come numero unico mescola due regimi opposti.
+
+    DATI PARZIALI: il CSV per singola corsa e' stato distrutto sovrascrivendolo con
+    quello di E5 (il banco stampava un percorso diverso da quello su cui scriveva -
+    difetto corretto). Ricostruite dal log tempo, tempo fermo e fermate per tutti e
+    dieci i livelli; perse le righe per corsa di distanza e velocita' media, di cui
+    restano solo gli aggregati qui sopra.
+
+--------------------------------------------------------------------------------
+E7. REPLICA DI E6 SU SEMI DISGIUNTI (su C3)   >>> IN CORSO <<<
+    banco  ibridazione_velocita/confronto_controlli.py --rapido --replica --variante=velocita_libera
+    dati   risultati_test/confronto_replica_velocita_libera.csv
+    Stessi dieci livelli, semi COMPLETAMENTE DIVERSI: folle disgiunte, non una
+    ripetizione delle stesse corse.
+
+    CRITERIO FISSATO PRIMA DI VEDERE I NUMERI: rapporto >= 2 sul tempo di
+    percorrenza. Se regge, il risultato e' riportabile in tesi. Se crolla, era
+    rumore - come successe alla metrica di esposizione del capitolo 5, passata da
+    2,35 a 1,07 in replica.
+
+    ESITO: IL CRITERIO NON E' PASSATO.
+
+                        prova 1 (E6)        replica (E7)
+      tempo             -12,3 s  rap 2,73   -2,9 s  rap 0,51
+      tempo fermo        +1,4 s  rap 1,11   +3,8 s  rap 1,73
+      numero fermate     -1,3    rap 0,72   +2,7    rap 0,91
+      distanza persone   -0,04 m rap 0,18   -0,03 m rap 0,33
+      velocita' media   +0,105   rap 2,85  +0,053   rap 2,08
+
+    Il guadagno di 12 s si e' ridotto a 3 e il rapporto e' crollato da 2,73 a 0,51.
+    Sull'AGGREGATO l'effetto NON e' confermato: la taglia vera e' circa la meta' di
+    quanto sembrava, e a questa numerosita' resta sotto la soglia di rilevabilita'.
+
+    UNENDO LE DUE PROVE (20 coppie, solo come descrizione - NON e' il test
+    pre-registrato, che riguardava la replica da sola):
+      tempo            -7,65 s  SE 3,72  rapporto 2,06  16/20  p segni 0,0118
+      tempo fermo      +2,59 s  SE 1,27  rapporto 2,05   7/20  -> PEGGIORA
+      numero fermate   +0,70    SE 1,76  rapporto 0,40   8/20  nullo
+
+    IL RISULTATO VERO STA PERO' NEL CONFRONTO PER LIVELLO. Le due prove hanno semi
+    disgiunti, quindi ogni livello ha due coppie indipendenti:
+
+      dens/100m2   prova 1   prova 2   accordo
+          1,9      -21,9 s    -8,0 s   meglio in entrambe
+          3,8      -15,0     -17,0     meglio in entrambe
+          5,7      -36,4     -18,1     meglio in entrambe
+          7,7      -18,7      -0,8     meglio in entrambe
+          9,6      -12,5      -9,2     meglio in entrambe
+         11,4       +9,4      -9,0     DISCORDI
+         13,4      -13,3      -8,5     meglio in entrambe
+         15,3      -13,0     -16,6     meglio in entrambe
+         17,2      +13,0     +18,7     peggio in entrambe
+         19,1      -15,1     +39,0     DISCORDI
+
+    Sette livelli su dieci concordano nel migliorare. Sotto l'ipotesi nulla la
+    probabilita' che un livello concordi nel verso buono e' 1/4, quindi sette
+    concordi su dieci valgono p = 0,0035.
+
+    PERCHE' L'AGGREGATO CROLLAVA: a 19,1 la replica da' +39 s, un valore isolato
+    che da solo gonfia l'errore standard di tutta la serie. La media viene
+    trascinata da due livelli estremi mentre sotto ci sono sette livelli regolari.
+
+    DA DICHIARARE IN TESI: il criterio pre-registrato riguardava l'aggregato ed e'
+    fallito; il passaggio all'analisi per livello e' avvenuto DOPO aver visto i
+    dati. E' legittimo - usa la replica per cio' che serve, confermare su semi
+    nuovi - ma va scritto cosi', non spacciato per il test originale.
+
+    CONCLUSIONE UTILIZZABILE: il controllo a strada libera riduce il tempo di
+    percorrenza fino a 15,3 persone ogni 100 m2 e lo peggiora sopra 17,2. Sul tempo
+    fermo peggiora in modo consistente (cinque livelli concordi in peggio, due in
+    meglio). Sulle fermate e sulla distanza non fa niente.
+
+--------------------------------------------------------------------------------
+E8. CAMPIONI AGGIUNTIVI SULLA FASCIA UTILE (su C3)   >>> IN CORSO <<<
+    banco  confronto_controlli.py --semi=3 --livelli=8 --variante=velocita_libera
+    dati   risultati_test/confronto_completo_velocita_libera.csv
+    8 densita' (1,9 - 15,3) x 3 semi = 48 corse.
+
+    Le due densita' piu' alte sono escluse: costano da sole piu' della meta' del
+    tempo di ogni campagna e sono quelle dove gia' sappiamo che il controllo
+    peggiora, con due prove concordi. Restano documentate con n=2 dichiarato.
+    Escluderle dal CAMPIONAMENTO e' legittimo; escluderle dalla TABELLA non lo
+    sarebbe, perche' nasconderebbe il limite superiore della finestra utile.
+
+    Con le due prove precedenti si arriva a 5 coppie per densita' sulla fascia utile.
+    [DA COMPLETARE QUANDO CHIUDE]
+
+
+--------------------------------------------------------------------------------
+E9. ORACOLO SUL CONTROLLO DI VELOCITA' (su C3)
+--------------------------------------------------------------------------------
+  Cosa: dentro il controllo di velocita' la previsione del Kalman e' sostituita
+        dalla posizione futura VERA, letta dal percorso pianificato della persona.
+        E' il predittore perfetto: nessuna rete potra' mai fare meglio.
+  Come: ai_controllo/misura_oracolo.py, 24 corse, tre bracci appaiati
+        (base / controllo / oracolo) sugli stessi semi.
+  File: risultati_test/oracolo_velocita_povo.csv + .config.json
+
+  ORACOLO contro CONTROLLO, segno + = oracolo meglio
+    tempo di percorrenza     -1,88 s      rapporto 0,49   NULLO
+    tempo fermo              -0,28 s      rapporto 0,28   NULLO
+    numero di fermate        -1,21        rapporto 0,65   NULLO
+    velocita' media          -0,014 m/s   rapporto 0,63   NULLO
+    distanza dalle persone   +0,239 m     rapporto 1,92   tendenza
+
+    la decisione cambia nel 28,1% dei fotogrammi (max 44,2%), residuo medio del
+    fattore 0,254; corse in cui l'oracolo e' piu' rapido: 12 su 24, testa o croce
+
+  LETTURA: l'informazione perfetta viene usata - il controllore risultante e'
+  materialmente diverso - e non produce alcuna prestazione. E' un TETTO DIMOSTRATO
+  DI ZERO per l'ibridazione basata sulla previsione del controllo di velocita'.
+  L'unica grandezza che si muove e' la distanza, con la stessa firma del margine
+  spaziale del capitolo 6 (rapporto 1,98): previsione migliore compra spazio,
+  mai secondi.
+
+--------------------------------------------------------------------------------
+E10. SOLO POSIZIONE contro base (su C3)   >>> E' IL RISULTATO CHE MANCAVA <<<
+--------------------------------------------------------------------------------
+  Cosa: controllo di velocita' SPENTO, acceso solo quello di posizione. Il robot
+        va a velocita' costante come il riferimento e puo' solo traslare di lato.
+        Serve a separare i due contributi, che in E5 erano accesi insieme.
+  Come: ibridazione_velocita/solo_posizione.py, 8 livelli x 3 semi = 24 coppie,
+        appaiate con le corse di base gia' in archivio (deterministiche a parita'
+        di seme, quindi non rieseguite).
+  File: risultati_test/solo_posizione_povo.csv
+
+  AGGREGATO SU 24 COPPIE
+    numero di fermate        5,83 in meno    rapporto 2,85  STABILITO  8/8 livelli
+    tempo trascorso fermo    3,00 s in meno  rapporto 3,23  STABILITO
+    tempo di percorrenza     11,21 s in piu' rapporto 3,06  STABILITO  8/8 livelli
+    allungamento percorso    +3,63%          rapporto 2,51  STABILITO
+    distanza dalle persone   +0,111 m        rapporto 1,10  NULLO  6/8, p=0,29
+
+  PER DENSITA' (persone/100 m2): d tempo / d fermate / d distanza
+     2,1   -7,4 s   +0,3   -0,456      10,6  -10,3 s   +4,0   +0,221
+     4,2  -20,5 s   +2,7   -0,286      12,7   -3,0 s   +6,0   +0,461
+     6,3   -6,0 s   +7,7   +0,304      14,8   -8,6 s  +12,7   +0,462
+     8,5  -19,6 s   +1,3   +0,030      16,9  -14,4 s  +12,0   +0,147
+
+  LETTURA: e' il primo e unico controllo che riduce le fermate sopra il rumore, e
+  lo fa con segno concorde su tutti e otto i livelli. Il guadagno CRESCE con la
+  densita' (+0,3 al livello minimo, +12,7 e +12,0 ai due massimi), coerente con il
+  meccanismo: l'arresto e' omnidirezionale e si evita spostandosi, non rallentando.
+  Il prezzo sono 11,2 s, di cui circa la meta' dal percorso piu' lungo (+3,6% =
+  ~4,5 m = ~5 s) e il resto dalla velocita' di avanzamento consumata dalla
+  traslazione laterale.
+  ATTESA SMENTITA: si prevedeva che il canale fosse la DISTANZA, ed e' nulla. Il
+  comfort ottenuto e' "mi fermo di meno", non "mi tengo piu' lontano".
+
+
+--------------------------------------------------------------------------------
+E11. RETE NEURALE DENTRO IL CONTROLLO DI VELOCITA' (su C3)
+--------------------------------------------------------------------------------
+  Cosa: la previsione che alimenta il controllo di velocita' passa da Kalman puro a
+        Kalman + correzione appresa. E' l'ibridazione vera e propria, quella di cui
+        E9 (oracolo) aveva gia' misurato il tetto.
+  Come: ai_controllo/ai_velocita.py (innesto) + estensione_ai.py, TRE campagne su
+        semi disgiunti fra loro. Aggregazione: ai_controllo/aggrega_ai.py
+  File: risultati_test/ai_velocita_povo.csv
+        risultati_test/ai_velocita_replica_povo.csv
+        risultati_test/ai_velocita_estensione_povo.csv
+
+  LE TRE CAMPAGNE, distanza dalle persone (AI meno Kalman)
+    prima          24 coppie   +0,123 m   errore 0,053   rapporto 2,30
+    replica        10 coppie   -0,085 m   errore 0,095   rapporto 0,90
+    estensione     48 coppie   -0,089 m   errore 0,072   rapporto 1,24
+    ------------------------------------------------------------------
+    AGGREGATO      82 coppie   -0,027 m   errore 0,047   rapporto 0,57
+
+  AGGREGATO SU 82 COPPIE, segno + = l'AI fa meglio
+    tempo di percorrenza     -0,21 s      rapporto 0,09   NULLO   5/10 livelli
+    tempo trascorso fermo    -0,35 s      rapporto 0,69   NULLO   3/10 livelli
+    numero di fermate        -1,28        rapporto 1,32   tendenza AL CONTRARIO
+    distanza dalle persone   -0,027 m     rapporto 0,57   NULLO   5/10 livelli
+    velocita' media          -0,013 m/s   rapporto 1,29   NULLO   4/10 livelli
+
+    (i livelli sono 10 e non 8 perche' la replica ne aveva due piu' densi, pop379 e
+     pop422, con una sola coppia ciascuno)
+
+  IL NUMERO CHE CHIUDE LA QUESTIONE
+    scarto tipico della differenza per coppia   0,428 m
+    intervallo al 95% sulla distanza            da -0,120 a +0,066 m
+  L'intervallo esclude qualunque guadagno superiore a 6,6 cm. Non e' "non abbiamo
+  trovato l'effetto": e' "l'effetto, se esiste, e' piu' piccolo di quanto valga la
+  pena inseguire". Per stabilire 6 cm servirebbero circa 200 coppie appaiate.
+
+  VALORI ASSOLUTI MEDI sulle stesse 82 coppie
+    tempo         kalman 137,83 s     ai 138,04 s
+    tempo fermo   kalman   9,66 s     ai  10,01 s
+    fermate       kalman  19,44       ai  20,72
+    distanza      kalman  1,899 m     ai   1,873 m
+    velocita'     kalman  0,974 m/s   ai   0,961 m/s
+
+  LETTURA: la rete non produce nulla, e il tetto lo diceva gia'. L'oracolo cambia la
+  decisione nel 28,1% dei fotogrammi con la posizione futura VERA e ottiene zero
+  prestazioni e +0,239 m di distanza a rapporto 1,92, cioe' nemmeno stabilito. La
+  rete e' molto peggiore del predittore perfetto e per giunta lavora fuori
+  distribuzione (addestrata prima dei due cambi di cinematica, e a orizzonte fisso
+  mentre il controllo interroga a orizzonti variabili). Una frazione di un tetto che
+  gia' non supera il rumore non puo' che essere nulla.
+
+  TERZO EPISODIO DI REPLICA FALLITA, ed e' un dato metodologico della tesi.
+    - esposizione alla prossimita': 2,35 in prima misura, 1,07 in replica
+    - margine spaziale della previsione: borderline, poi rientrato
+    - distanza con la rete nel controllo: 2,30 su 24 coppie, -0,085 e -0,089 su
+      58 coppie indipendenti. Il valore iniziale era la coda favorevole di una
+      distribuzione centrata sullo zero.
+  Lo scarto tipico della differenza per coppia e' circa 0,29 m, dieci volte
+  l'effetto cercato: con 24 coppie l'errore standard e' 0,06 m e un rapporto sopra 2
+  si ottiene per caso con probabilita' non trascurabile. E' la ragione per cui in
+  questa tesi nessun effetto viene dichiarato senza replica su semi disgiunti.
+
+  NOTA SUL TEMPO DI PARETE: la campagna di estensione riporta 130,8 min totali, ma
+  contiene una sospensione della macchina di circa 80 minuti fra la corsa 60 e la
+  61. Il calcolo effettivo e' di circa 50 minuti. I dati non ne risentono, essendo
+  le corse deterministiche a parita' di seme.
+
+
+================================================================================
+4. QUADRO COMPLESSIVO
+================================================================================
+
+I DUE CONTRIBUTI, MISURATI SEPARATAMENTE
+                          tempo        fermate      tempo fermo
+  controllo VELOCITA'     -17,6 s      nullo        nullo
+   (velocita_libera)      rapp. 6,18   rapp. 0,95   rapp. 0,29
+  controllo POSIZIONE     +11,2 s      -5,8         -3,0 s
+   (solo_posizione)       rapp. 3,06   rapp. 2,85   rapp. 3,23
+
+  Uno vende tempo, l'altro compra comfort pagandolo in tempo. Entrambi i versi
+  sono stabiliti con segno concorde su 8 livelli su 8 (test dei segni p=0,0078).
+
+STABILITO (rapporto sopra 2)
+  - controllo classico su C1: PEGGIORA il tempo del 18,4%
+  - velocita_libera su C3: MIGLIORA il tempo di 17,6 s su 150,1 (-11,7%),
+    8/8 livelli, 29 coppie vinte su 32
+  - solo_posizione su C3: RIDUCE le fermate di 5,83 e il tempo fermo di 3,00 s,
+    al prezzo di 11,2 s di percorrenza; 8/8 livelli su entrambi i versi
+  - velocita_libera e libera_posizione: aumentano la velocita' media di ~0,11 m/s
+  - libera_posizione: allunga il percorso dell'11,5% (rapporto 3,33)
+
+NULLO (rapporto sotto 1,3, misurato e non "non misurato")
+  - controllo classico su C2: tutto, su cinque grandezze e 50 coppie
+  - controllo classico SENZA strada libera: 3,7 s PIU' LENTO del riferimento,
+    rapporto 1,62, 21 coppie vinte su 50. Tutto il guadagno di velocita_libera
+    viene dal ramo dello sprint, non dall'anticipazione dei conflitti
+  - oracolo sul controllo di velocita': TETTO DIMOSTRATO DI ZERO (vedi E9)
+  - rete neurale dentro il controllo di velocita': nulla su 82 coppie e su tutte e
+    cinque le grandezze (vedi E11). Il tetto di E9 era gia' sotto il rumore, quindi
+    l'esito era prevedibile prima di misurarlo - ed e' stato previsto
+  - distanza dalle persone: nulla per OGNI variante provata, oracolo compreso
+
+CORRETTO RISPETTO ALLE VERSIONI PRECEDENTI DI QUESTO FILE
+  - "mai osservata una riduzione delle fermate": non e' piu' vero. solo_posizione
+    la produce, rapporto 2,85, 8 livelli su 8. La riga era corretta finche' si
+    misurava il solo controllo di velocita'.
+  - velocita_libera valeva 12,3 s in E6 e 19,8 s in una lettura intermedia. I due
+    numeri buoni sono entrambi corretti e vanno distinti, perche' sono due medie
+    diverse dello stesso dato:
+      17,6 s  media PER LIVELLO sugli 8 livelli comuni, 8/8 concordi
+      14,8 s  media PER COPPIA su tutte e 34 le coppie, rapporto 4,49, 29 vinte
+    Le tabelle a quattro bracci usano la media per coppia, come ogni altro
+    confronto del lavoro. Il 19,8 s era il solo file completo (24 coppie); la
+    replica su semi disgiunti dava -2,9 s a rapporto 0,51 ma 8 coppie vinte su 10,
+    quindi conferma il verso senza confermare l'ampiezza.
+
+PERCHE', IN DUE RIGHE
+  Le fermate sono prodotte dall'arresto di sicurezza, che guarda la distanza in
+  ogni direzione adesso. Rallentando non si crea distanza, quindi il controllo di
+  velocita' non puo' ridurle - e infatti non le riduce nemmeno con la previsione
+  perfetta dell'oracolo. Spostandosi di lato la distanza si crea, e le fermate
+  calano. Il controllo giusto per ogni grandezza e' quello che agisce sull'asse
+  di quella grandezza.
+
+
+================================================================================
+5. DOVE STANNO I FILE
+================================================================================
+
+BANCHI DI MISURA (ibridazione_velocita/)
+  performance_velocita_classico.py  caratterizzazione del controllo classico,
+                                    10 livelli x 5 semi, due condizioni
+  diagnosi_fermate.py               da dove arrivano gli arresti e quanto spazio
+                                    laterale c'e' per schivarli
+  confronto_controlli.py            N condizioni contro base. Modalita':
+                                      (nessuna)  10 livelli x 3 semi x 5 condizioni
+                                      --corto    validazione del banco
+                                      --rapido   10 livelli x 1 seme, 20 corse
+                                      --mirato   solo pop126/169/253
+                                      --replica  semi disgiunti per la conferma
+                                      --semi=N   numero di semi
+                                      --variante=NOME  una condizione specifica
+  configurazione.py                 impronta della configurazione accanto ai dati
+  grafico_fermate.py                grafico fermate per densita'
+  sguardo_rapido_velocita.py        una coppia per densita', esplorativo
+
+DATI (risultati_test/)
+  velocita_classico_povo_sweep_cinematica_vecchia.csv   E1, configurazione C1
+  velocita_classico_povo_sweep.csv                      E2, configurazione C2
+  confronto_controlli_povo_libera_posizione.csv         E5, configurazione C3
+  confronto_controlli_povo.csv                          copia di E5
+  confronto_rapido_velocita_libera_ricostruito.csv      E6 parziale, da log
+  confronto_replica_velocita_libera.csv                 E7, in corso
+
+CONDIZIONI SPERIMENTALI (testing.py, CONDIZIONI)
+  base                (F,F,F,F)  robot senza controlli, velocita' costante
+  solo_ai             (V,F,F,F)  correzione AI sulla macchia
+  solo_velocita       (F,V,F,F)  controllo di velocita' classico
+  completo            (V,V,F,F)  AI + velocita'
+  solo_posizione      (F,F,V,F)  controllo di posizione
+  velocita_posizione  (F,V,V,F)  velocita' classica + posizione
+  completo_posizione  (V,V,V,F)  tutto tranne strada libera
+  velocita_libera     (F,V,F,V)  strada libera al massimo
+  libera_posizione    (F,V,V,V)  strada libera + posizione
+  I primi quattro nomi NON vanno cambiati: li usano i CSV del capitolo 5.
+
+
+================================================================================
+6. RIPRODUCIBILITA'
+================================================================================
+Dal 18 agosto ogni CSV prodotto da confronto_controlli.py ha accanto un file
+<nome>.config.json con: scala, velocita' in m/s, banda di autorita', limiti
+dinamici, geometria dei corpi (distinguendo le costanti da cio' che il pannello
+sovrascrive), parametri dei due controlli, popolazione, livelli, semi, condizioni,
+riga di comando e commit git.
+
+Il commit riporta "+modifiche-non-committate" quando l'albero e' sporco: un hash
+pulito garantisce la riproducibilita', uno sporco avverte che non la garantisce.
+Al 18 agosto tutto il codice di queste misure e' ANCORA NON COMMITTATO.
+
+Questo meccanismo ha trovato subito la discrepanza sui raggi documentata nella
+sezione 1: parametri che cambiano dall'interfaccia, non lasciano traccia nel CSV,
+e nessuno se ne accorge.
+
+
+================================================================================
+7. DA FARE
+================================================================================
+  [ ] completare E7 e decidere sul criterio del rapporto >= 2
+  [X] FATTO, E IPOTESI FALSIFICATA. L'ibridazione e' stata eseguita (E11) e la
+      catena descritta qui sotto non si e' verificata. Il testo resta com'era
+      scritto PRIMA della misura, perche' e' cosi' che vale: una predizione
+      precisa e sbagliata, non una spiegazione costruita dopo il risultato.
+      Testo originale: "lo sprint scatta solo se NON c'e' alcun conflitto previsto
+      entro 5 m; con un errore di previsione di circa un metro molti conflitti sono
+      falsi allarmi che sopprimono lo sprint; una previsione migliore apre il
+      rubinetto. E' il primo componente della serie con effetto non nullo, quindi
+      il primo per cui ibridare ha senso."
+      COSA E' SUCCESSO INVECE: la previsione migliore arriva davvero al controllo
+      (l'oracolo cambia la decisione nel 28,1% dei fotogrammi, residuo 0,254 su un
+      fattore che vive fra 0,20 e 2,00), ma il rubinetto non si apre. Il collo di
+      bottiglia non e' a monte nella qualita' della stima: e' a valle, nel fatto
+      che decisioni diverse sul fattore di velocita' producono lo stesso tempo e
+      la stessa distanza.
+  [X] FATTO (E9), ed e' il risultato portante del capitolo. L'oracolo e' l'AI
+      PERFETTA: riduce l'errore del Kalman del 100%, mentre la rete addestrata lo
+      riduce di circa il 12%. Se il 100% non produce nulla, il 12% non puo'.
+      Anzi l'oracolo sta SOPRA il massimo fisicamente raggiungibile, perche' legge
+      la posizione futura dal percorso pianificato della persona: un'informazione
+      che nessun sensore potrebbe acquisire, dato che una persona puo' cambiare
+      idea e l'oracolo sa che non lo fara'.
+      ENUNCIATO PER LA TESI: il contributo di qualunque sistema predittivo al
+      controllo di velocita' e' limitato superiormente dal contributo del
+      predittore perfetto, che e' misurato ed e' nullo su ogni grandezza tranne
+      una tendenza non stabilita sulla distanza (+0,239 m, rapporto 1,92). E' un
+      enunciato di impossibilita', valido anche per reti mai addestrate.
+  [ ] soglia di densita' sullo sprint: correre al massimo solo con poca gente
+      intorno. E' la modifica con piu' probabilita' di spostare fermate e tempo
+      fermo, e usa un ingresso che il controllo gia' possiede e ignora
+  [ ] riallenare l'AI se la si vuole usare: le velocita' sono cambiate due volte,
+      il modello attuale lavora fuori distribuzione
+  [ ] committare il codice: le misure attuali non sono riproducibili da un hash

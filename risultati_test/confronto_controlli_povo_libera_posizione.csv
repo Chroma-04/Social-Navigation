@@ -1,0 +1,11 @@
+mappa,livello,seme,condizione,tempo_s_base,tempo_s_variante,fermo_s_base,fermo_s_variante,numero_fermate_base,numero_fermate_variante,distanza_media_m_base,distanza_media_m_variante,velocita_media_m_s_base,velocita_media_m_s_variante
+povo,pop42,1943491379,libera_posizione,110.0,104.75,0.0,1.5,0,2,3.3192,5.4842,0.9887,1.071
+povo,pop84,906082570,libera_posizione,124.0833,107.0833,1.4167,0.9167,4,4,5.2134,5.1916,0.9482,1.16
+povo,pop126,2765098682,libera_posizione,138.0833,98.0833,8.1667,1.75,16,4,2.1708,2.7592,0.8389,1.1992
+povo,pop169,1342428719,libera_posizione,143.75,177.0833,3.5,7.3333,9,24,1.8047,1.4817,0.9041,0.9734
+povo,pop211,333411971,libera_posizione,160.5833,121.0833,11.0,5.8333,21,10,1.5266,2.2545,0.8043,1.063
+povo,pop253,2579354283,libera_posizione,157.6667,167.0833,6.4167,7.8333,28,20,1.3898,1.1934,0.8349,0.8658
+povo,pop295,3698014354,libera_posizione,186.0833,190.6667,15.5,15.8333,38,44,1.094,1.3405,0.7379,0.8753
+povo,pop337,3376995075,libera_posizione,177.0833,201.0833,12.8333,10.0,36,29,1.366,1.15,0.7642,0.7993
+povo,pop379,1251750656,libera_posizione,168.0833,204.0833,14.5833,16.3333,34,34,1.2358,1.0824,0.7455,0.7315
+povo,pop422,2775976008,libera_posizione,186.0833,191.75,18.0,10.6667,42,24,0.9672,0.9938,0.711,0.7119

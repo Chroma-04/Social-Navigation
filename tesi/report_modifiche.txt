@@ -1,0 +1,514 @@
+================================================================================
+REPORT DELLE MODIFICHE AL SIMULATORE E CONSEGUENZE PER LA TESI
+Ultimo aggiornamento: 17 agosto 2026
+================================================================================
+
+Traccia di ogni modifica che cambia il significato dei dati o che va dichiarata
+in tesi. Da aggiornare ad ogni intervento.
+
+
+================================================================================
+1. SCALA SPAZIALE - 1 CELLA = 1 METRO  (era 0,5 m)
+================================================================================
+
+COSA
+  METRI_PER_CELLA = 1.0 e CM_PER_PIXEL in testa a main.py. La scala fisica non
+  era scritta da nessuna parte, era solo implicita.
+  Conversione comoda: px/frame x 2 = m/s.
+
+PERCHE'
+  Con 0,5 m per cella la planimetria produceva numeri implausibili:
+    - porte di 0,5 m (25 varchi da una sola cella): impassabili per una persona
+    - 24 aule in 803 m2 lordi = 33 m2 ad aula compresi corridoi e servizi,
+      mentre un'aula da 26 persone (D.M. 26/8/1992) ne richiede almeno 45-50
+    - corridoi da 1,5 m, sotto qualunque norma di esodo scolastica
+  La scala e' ancorata all'INGOMBRO DEI CORPI (spalle 46 cm, verificabile da
+  chiunque), non alle velocita' ne' a una stima a occhio dei corridoi.
+
+CONSEGUENZE
+  - superficie calpestabile: 499 -> 1997 m2 (lorda 803 -> 3212 m2)
+  - porte 1 m, corridoi 3 m, aule ~134 m2 lordi: tutti plausibili
+  - densita' di riferimento: 0,70 -> 0,175 pers/m2 (349 individui)
+  - il rapporto con l'affollamento massimo del D.M. NON cambia (~56%): e' un
+    rapporto fra due conteggi sulla stessa area
+  - i risultati appaiati e percentuali NON cambiano: -12,5%, tempi invariati,
+    +5,2% di margine restano quelli
+  - in tesi: tutte le lunghezze x2, tutte le densita' /4
+
+LIMITE DA DICHIARARE
+  A questa scala le velocita' originali risultavano gonfiate: nel simulatore una
+  persona percorre 8,5 raggi corporei al secondo contro i 5,6 di una persona
+  vera. Nessuna scala sistema insieme geometria e velocita': si e' scelto di
+  ancorare alla geometria e correggere le velocita' separatamente (punto 3).
+
+
+================================================================================
+2. IL PIANIFICATORE E' THETA*, NON A*
+================================================================================
+
+  La funzione si chiama algoritmo_a_star per ragioni storiche ma implementa
+  Theta* (any-angle): la prova e' scorciatoia_libera, il controllo di visibilita'
+  fra celle non adiacenti. Quasi tutti i commenti dicevano "A*".
+  Citazione: Daniel, Nash, Koenig, Felner, "Theta*: Any-Angle Path Planning on
+  Grids", JAIR 39, 2010.
+
+  NOTA PER L'ARGOMENTO DEL CAPITOLO 5
+  Theta* rende continua la GEOMETRIA del percorso, ma la mappa di costo resta
+  discreta: la regione di rischio entra come indice di cella. La soglia di
+  risoluzione regge lo stesso, anzi e' piu' netta - un pianificatore gia'
+  continuo nello spazio conserva il vincolo.
+
+
+================================================================================
+3. VELOCITA' REALISTICHE  (main.py)
+================================================================================
+
+                        PRIMA           ADESSO
+  robot, crociera       3,0 m/s         1,0 m/s     VELOCITA_ROBOT 1.5 -> 0.5
+  pedone medio          2,0 m/s         1,2 m/s     VELOCITA_PERSONA 1.0 -> 0.6
+  pedoni, dispersione   1,5 - 2,5       0,9 - 1,5
+  corridori             4,0 m/s         2,4 m/s     (moltiplicatore 2,0 invariato)
+
+PERCHE'
+  I valori erano fuori scala e soprattutto INVERTITI rispetto alla realta': il
+  robot era una volta e mezza piu' veloce di chi cammina. In quella condizione
+  cedere il passo non scioglie un conflitto, lo prolunga - il robot raggiunge le
+  persone da dietro e restare dietro e' l'unico esito possibile. Ora il robot va
+  poco piu' piano del pedone medio, come un robot di servizio vero (0,5-1,2 m/s
+  tipici), ed e' la folla a scorrergli attorno: e' il regime in cui
+  l'anticipazione ha qualcosa da guadagnare.
+
+ATTENZIONE METODOLOGICA
+  Abbassare tutto dello STESSO fattore non avrebbe cambiato nulla: conta solo il
+  rapporto fra le velocita'. Il guadagno viene dall'averli abbassati di fattori
+  diversi (robot /3, pedoni /2), portando il rapporto robot/pedone da 1,5 a 0,83.
+
+
+================================================================================
+4. BANDA DI AUTORITA' DEL CONTROLLO DI VELOCITA'  (main.py)
+================================================================================
+
+                        PRIMA           ADESSO
+  FATTORE_..._MIN       0,35            0,20    ->  0,2 m/s
+  FATTORE_..._MAX       1,25            2,00    ->  2,0 m/s
+
+PERCHE'
+  Con un tetto a 1,25 volte la nominale il controllo poteva variare di un quarto:
+  troppo poco per sciogliere un conflitto, qualunque soglia gli si metta. Sui 5 m
+  di orizzonte di lookahead lo sprint guadagnava circa un secondo, mentre il
+  pedone nel frattempo si spostava di piu' di un metro. Con il tetto a 2,0 m/s il
+  robot percorre quei 5 m in 2,5 s invece di 5: il ramo di accelerazione torna a
+  poter fare cio' per cui esiste.
+
+  Il tetto e' fissato SOTTO la velocita' dei corridori (2,4 m/s): il robot puo'
+  spingersi al passo di un pedone svelto, non superare chi corre. E' un limite
+  che si giustifica da se' invece di essere un numero scelto a caso.
+
+TENSIONE DA MISURARE
+  Sfrecciare a 2,0 m/s accanto a una persona e' precisamente cio' che la
+  prossemica considera sgradevole: si comprano meno fermate al prezzo di
+  passaggi piu' aggressivi. La metrica giusta e' l'esposizione PESATA SULLA
+  VELOCITA' (quanto tempo si passa vicino a qualcuno andando forte), non ancora
+  implementata.
+
+
+================================================================================
+5. LIMITI DI ACCELERAZIONE E DECELERAZIONE  (main.py, testing.py)
+================================================================================
+
+  ACCELERAZIONE_ROBOT_M_S2 = 0.5
+  DECELERAZIONE_ROBOT_M_S2 = 1.0
+  Funzione limita_accelerazione() in main.py, richiamata dal ciclo interattivo e
+  da esegui_corsa() in testing.py.
+
+VALORI DI RIFERIMENTO (per la citazione in tesi)
+  - robot di servizio da interni: 0,3 m/s2 in accelerazione e 0,6 in
+    decelerazione, con velocita' di sicurezza 0,5 m/s
+  - robot cingolati sperimentali: accelerazione limitata fra 0,3 e 0,7 m/s2
+  - pianificatori locali ROS (acc_lim_x) in pratica: 0,8 - 2,5 m/s2
+  Scelta una via di mezzo conservativa, mantenendo l'asimmetria dei sistemi reali
+  (frenare piu' in fretta che accelerare, essendo la frenata anche una funzione
+  di sicurezza). Il robot passa da fermo alla crociera di 1,0 m/s in 2 s e si
+  arresta in 1 s.
+
+PERCHE' E' LA MODIFICA PIU' IMPORTANTE PER L'OBIETTIVO
+  Senza inerzia il robot si ferma e riparte istantaneamente a velocita' piena:
+  FERMARSI E' GRATIS. Era gia' dichiarato in tesi come riserva nel paragrafo sul
+  controllo di velocita'. Un controllo che esiste per evitare fermate non puo'
+  vincere in un mondo dove le fermate non costano nulla. Con accelerazione finita
+  ogni arresto si paga con la decelerazione e con la ripartenza, e ridurre il
+  numero di fermate diventa un guadagno reale invece che contabile.
+
+DETTAGLIO IMPLEMENTATIVO
+  Il limite vale in ENTRAMBE le condizioni sperimentali (con e senza controllo):
+  l'inerzia e' una proprieta' del veicolo, non del controllo che lo comanda.
+  L'arresto di sicurezza resta istantaneo (e' un'emergenza) ma azzera la
+  velocita' corrente, cosi' la ripartenza risale l'intera rampa.
+
+
+================================================================================
+6. LIMITE DI CORSA NON CONCLUSA  (testing.py)
+================================================================================
+
+  FRAME_MAX: da 150 a 450 secondi equivalenti. Il vecchio limite era tarato su un
+  robot a 3,0 m/s che attraversava in ~50 s. A 1,0 m/s i tempi triplicano e 150 s
+  avrebbe tagliato tutte le corse, trasformando una salvaguardia contro le corse
+  infinite in un filtro sulle corse normali.
+
+
+================================================================================
+7. PULIZIA DEL REPOSITORY
+================================================================================
+
+  - aggiunto .gitignore (mancava del tutto); tolti dall'indice 20 file
+    __pycache__. Dataset .npz e modelli .pt restano volutamente versionati: sono
+    l'artefatto su cui poggiano i risultati e rigenerarli costa ore.
+  - rimossa la cartella --x/, 13 PNG identici ad anteprime_mappe/, nata da un
+    comando con un argomento interpretato come nome di cartella.
+  - consolidata ai_predittiva2 dentro ai_predittiva. I modelli .pt erano byte per
+    byte identici e nessuno importava la cartella 2. Vi si conservavano pero'
+    l'analisi stratificata corretta e dataset_previsione_povo_5x.npz, da cui
+    viene il 12,5% riportato in tesi. La taratura Povo del generatore sopravvive
+    come flag --povo invece che come file duplicato.
+    VERIFICATO dopo lo spostamento: 12,5% su 160.189 campioni, invariato.
+
+  INCONGRUENZA APERTA
+  Il commento del generatore dice 25 aule -> 650 persone; la tesi dice 24 aule ->
+  624. Uno dei due numeri e' sbagliato e va deciso quale.
+
+
+================================================================================
+8. COSA QUESTE MODIFICHE INVALIDANO
+================================================================================
+
+MODELLO AI FUORI DISTRIBUZIONE
+  La rete riceve le velocita' filtrate in valore assoluto, non rapporti. I pedoni
+  sono passati da 1,0 a 0,6 px/frame (-40%) e il residuo del Kalman si riduce
+  nella stessa misura: il modello sovracorreggerebbe in modo sistematico. Il
+  12,5% NON descrive piu' questo simulatore. Per ibridare il controllo di
+  velocita' serve rigenerare il dataset e riallenare.
+  Per il controllo di velocita' DA SOLO nessun problema: l'AI non entra in gioco
+  e le due condizioni sono entrambe senza correzione.
+
+CAMPAGNE DEL CAPITOLO 5
+  Misurate sulla cinematica vecchia. Non diventano sbagliate: diventano misure di
+  un'altra configurazione. Strada scelta: lasciare il capitolo 5 dov'e' con il
+  suo limite gia' dichiarato, e impostare il capitolo sul controllo di velocita'
+  come studio a se', condotto sulla cinematica corretta, spiegando che sul
+  modello originale il componente non poteva funzionare per costruzione.
+
+
+================================================================================
+9. RISULTATI GIA' MISURATI - CINEMATICA VECCHIA
+================================================================================
+
+Archiviati in risultati_test/velocita_classico_povo_sweep_cinematica_vecchia.csv
+
+CONTROLLO DI VELOCITA' A DENSITA' SINGOLA (0,70 pers/m2 vecchia scala, 50 semi)
+  tempo di percorrenza   53,11 -> 66,17 s   +24,6%, rapporto 10,4, 47/50 perse
+  tempo fermo             8,39 ->  8,58 s   invariato, rapporto 0,30
+  frenata 39,2% dei fotogrammi, sprint 3,8%, fattore medio 0,839
+
+SWEEP SU 10 DENSITA' (5 semi per livello, 100 corse)
+  tempo: peggiorato in 10 livelli su 10, mediana +14,4%
+  velocita' media: piu' bassa in 10 livelli su 10
+  fermate: aggregato +2,9 a favore del controllo, rapporto 1,47, 22/50 coppie
+           -> NON stabilito. Un solo livello supera la soglia (pop253, 3,23)
+  distanza media dai corpi mobili: -0,091 m aggregato, rapporto 0,91 -> nessun
+           effetto, semmai leggermente negativo
+  frenata: cresce dal 5,5% al 51% al crescere della folla
+  sprint:  non supera mai il 3,8% in nessuna condizione
+
+LETTURA
+  Il componente paga tempo e velocita' e non compra nulla di dimostrabile.
+  L'asimmetria fra i due regimi e' strutturale e peggiora con la densita': il
+  controllo degenera in puro freno proprio dove servirebbe di piu'.
+  ATTENZIONE: la fascia centrale in cui le fermate sembrano calare poggia su un
+  livello solo. Va verificata con ipotesi fissata in anticipo e semi DISGIUNTI,
+  come si e' fatto per l'esposizione alla prossimita' (che in replica e' crollata
+  da rapporto 2,35 a 1,07 e non e' stata riportata).
+
+
+================================================================================
+9bis. PRIMO SEGNALE SULLA CINEMATICA NUOVA  (17 agosto, UNA COPPIA DI CORSE)
+================================================================================
+
+Povo, 349 individui, seme 12345, corsa singola per condizione:
+  base           164,1 s   tempo fermo 16,3 s
+  solo_velocita  144,8 s   tempo fermo  8,1 s
+  -> il controllo e' piu' veloce di 19,3 s (-11,8%) e dimezza il tempo fermo
+
+IL SEGNO SI E' RIBALTATO rispetto alla cinematica vecchia, dove lo stesso
+componente costava +24,6% e lasciava le fermate invariate. E' quanto i tre
+interventi prevedevano ciascuno per conto proprio: robot piu' lento della folla
+(cedere il passo scioglie l'incrocio invece di prolungarlo), fermarsi costa due
+secondi di riaccelerazione (evitare una fermata vale qualcosa), banda 0,2-2,0
+(il controllo ha l'autorita' per agire).
+
+RISERVA: e' UNA coppia. Sulla cinematica vecchia due semi identici per
+configurazione differivano di 6,5 s, e qui i tempi sono tre volte piu' lunghi.
+Nulla e' stabilito finche' non gira la campagna appaiata sui dieci livelli.
+
+Entrambe le corse concludono entro 450 s: FRAME_MAX e' tarato bene.
+
+
+================================================================================
+10. DA FARE
+================================================================================
+
+  [ ] rilanciare la caratterizzazione del controllo classico sulla cinematica
+      nuova (10 livelli x 5 semi; le corse durano ~3 volte di piu')
+  [ ] riscrivere in tesi tutti i numeri in metri: lunghezze x2, densita' /4
+  [ ] paragrafo sulle misure fisiche dei corpi (ingombri, porte, corridoi)
+  [ ] decidere 24 o 25 aule
+  [ ] sezione "Dove si arresta il guadagno" - scritta, da inserire in coda al
+      capitolo 5
+  [ ] appendice sul controllo di velocita' -> diventa capitolo dedicato;
+      ripuntare il riferimento app:velocita in 5.2.1, altrimenti resta ??
+  [ ] correggere in 5.2.1 la motivazione per cui il controllo e' spento: NON e'
+      contaminazione diretta (fattore_velocita_da_conflitto riceve il Kalman
+      grezzo, mai le correzioni AI), e' un'interazione - variando la velocita'
+      cambia dove il robot si trova, quindi cosa vede il lidar, quindi le
+      correzioni stesse
+  [ ] conclusioni con il criterio decisionale
+  [ ] metrica di esposizione pesata sulla velocita' (comfort)
+  [ ] se si vuole ibridare il controllo: rigenerare dataset e riallenare
+
+
+================================================================================
+11. CAMPAGNA LANCIATA SULLA CINEMATICA NUOVA (17 agosto 2026)
+================================================================================
+
+Prima di lanciarla ho archiviato i dati vecchi, perche' lo script sovrascrive
+sempre lo stesso file:
+
+  risultati_test/velocita_classico_povo_sweep.csv
+      -> velocita_classico_povo_sweep_cinematica_vecchia.csv   (50 coppie)
+
+Quelle 50 coppie sono la meta' "prima" del confronto prima/dopo. Senza di loro
+il ribaltamento di segno non e' documentabile in tesi: resterebbe solo il
+risultato nuovo, senza il termine di paragone che lo rende un risultato.
+
+In corso: 10 livelli x 5 semi x 2 condizioni = 100 corse, 8 processi.
+Attesa 1,5-2 h. Esito da riportare qui sotto quando finisce.
+
+
+================================================================================
+12. ESITO DELLA CAMPAGNA SULLA CINEMATICA NUOVA (18 agosto 2026)
+================================================================================
+
+100 corse in 5229 s (87 min), 50 coppie appaiate, 10 livelli x 5 semi.
+Nessuna corsa ha toccato il limite di 450 s: tutte le coppie sono valide.
+Dati: risultati_test/velocita_classico_povo_sweep.csv
+
+IL RIBALTAMENTO DI SEGNO NON REGGE. La coppia singola dava -11,8% di tempo e
+tempo fermo dimezzato. Sui 50 accoppiamenti quel guadagno non esiste: era una
+estrazione fortunata da una distribuzione larga. Va cancellato da qualsiasi
+ragionamento, e la sezione 9bis di questo report va letta solo come cronaca.
+
+QUELLO CHE INVECE E' CAMBIATO DAVVERO, ed e' il risultato della campagna:
+
+                        cinematica vecchia        cinematica nuova
+  tempo percorrenza     +18,4%  rapporto 7,69     +2,4%  rapporto 1,62
+                        0/10 livelli favorevoli   4/10 livelli favorevoli
+                        p (segni) = 0,002         p (segni) = 0,75
+  tempo fermo           +3,1%   rapporto 0,37     +3,3%  rapporto 0,56
+  numero fermate        -10,6%  rapporto 1,47     -1,9%  rapporto 0,29
+
+Il COSTO del controllo di velocita' e' scomparso. Sulla cinematica vecchia era
+il risultato piu' solido di tutta la serie: peggiorava il tempo in tutti e dieci
+i livelli, 45 coppie perse su 50, rapporto 7,69. Sulla cinematica nuova e'
+indistinguibile da zero. Non e' diventato un guadagno: e' diventato gratis.
+
+MECCANISMO, leggibile nei due regimi:
+  frenata:  32,3% dei fotogrammi -> 12,4%
+  sprint:    2,9% dei fotogrammi ->  7,4%
+La banda 0,20-2,00 ha dato al controllo l'autorita' di accelerare, che prima
+non aveva. Smesso di essere un freno puro, ha smesso di costare tempo.
+
+LE FERMATE RESTANO NULLE. E' l'obiettivo dichiarato - meno fermate, piu' comfort -
+e il controllo classico non lo raggiunge in nessuna delle due cinematiche:
+rapporto 1,47 prima, 0,29 adesso, 27 coppie vinte su 50, cioe' testa o croce.
+Idem il tempo fermo, rapporto 0,56.
+
+UN LIVELLO ANOMALO, da non riportare come risultato. pop337: -15,4 fermate,
+rapporto 2,76, 5 coppie vinte su 5, e -4,0 s di tempo fermo. Ma sulla cinematica
+vecchia lo stesso livello dava -1,2 fermate con rapporto 0,21: non replica. Con
+dieci livelli, un rapporto 2,76 e' quanto ci si aspetta dal caso. Se lo si vuole
+usare va ripetuto a 50 semi, ed e' l'unico posto dove varrebbe la pena farlo.
+
+COSA SIGNIFICA PER LA TESI. Il controllo di velocita' classico e' oggi un
+componente a costo nullo e beneficio nullo. E' una premessa migliore per
+l'ibridazione di quanto lo fosse prima: l'AI avrebbe autorita' di manovra
+(banda 0,2-2,0, sprint gia' al 7,4%) senza dover prima ripagare un pegno del
+18% sui tempi. Resta che ibridarlo richiede rigenerare il dataset e riallenare,
+perche' le velocita' sono cambiate.
+
+
+================================================================================
+13. CONTROLLO DI POSIZIONE (evitamento laterale predittivo) - 18 agosto 2026
+================================================================================
+
+NUOVO COMPONENTE, non una modifica di quelli esistenti. Theta* continua a
+scegliere il percorso sui costi di cella; questo strato decide dove stare ENTRO
+un intorno di quel percorso, per aggirare le persone invece di solo rallentare.
+
+PERCHE'. Il controllo di velocita' ha un solo grado di liberta' - quanto forte
+andare su una traiettoria fissata - e con quello non si schiva nessuno. Inoltre
+l'arresto di sicurezza scatta a 40 cm IN OGNI DIREZIONE, mentre il controllo di
+velocita' guarda solo avanti lungo il percorso, entro 70 cm. Rallentare non
+aumenta la distanza dalle persone: allunga la permanenza nella folla, quindi le
+occasioni di essere fermati. Una traslazione laterale agisce invece proprio
+sulla grandezza che fa scattare l'arresto.
+
+DOVE STA NEL CODICE
+  main.py   offset_evitamento_predittivo()   la funzione
+            _candidati_manovra()             i 17 punti campionati
+            _distanza_da_segmento()          scostamento dalla traiettoria
+            costanti RAGGIO_MANOVRA_PX, PREVISIONE_EVITAMENTO_FRAME,
+            SIGMA_REPULSIONE_PX, PESO_RITORNO_PERCORSO,
+            VELOCITA_LATERALE_MAX_M_S, RAGGIO_INTERESSE_EVITAMENTO_PX
+            casella di pannello "Posizione predittiva (schivata)", spenta di
+            default; il tasto di ripristino NON la accende (resta opt-in)
+  testing.py  condizioni solo_posizione, velocita_posizione, completo_posizione.
+            CONDIZIONI passa da coppie a terne: i quattro nomi vecchi restano
+            invariati perche' li usano i CSV gia' prodotti
+
+COME FUNZIONA
+  1. proietta col Kalman le persone tracciate entro 4 m, a tre istanti (0, 0,5 s, 1 s);
+  2. valuta 17 posizioni candidate in un disco di 1 m attorno al robot;
+  3. per ognuna somma una campana di repulsione per persona e per istante - e' la
+     SOVRAPPOSIZIONE degli effetti: due persone vicine creano una zona peggiore di
+     quanto ciascuna farebbe da sola, ed e' il caso in cui piu' conviene passare
+     altrove - piu' un termine che penalizza lo scostamento dal percorso;
+  4. scarta i candidati fuori mappa o dentro un muro;
+  5. si muove verso il migliore, con velocita' laterale limitata a 0,5 m/s.
+
+Campionamento e NON gradiente: fra due persone un gradiente si ferma nel minimo
+in mezzo, il campionamento sceglie da che parte passare. Tratta inoltre i muri
+come esclusioni invece che come una forza da bilanciare.
+
+Il rientro sul percorso non e' una fase a se': e' il termine di scostamento che
+lo produce da solo appena il rischio si dirada.
+
+DIAGNOSI CHE LO MOTIVA (ibridazione_velocita/diagnosi_fermate.py, nuovo)
+Registra, per ogni arresto di sicurezza, da che direzione arriva la persona che
+lo innesca e quanto varco libero c'e' perpendicolarmente alla marcia. Nessuna
+riga di testing.py e' modificata: si intercettano _rileva_e_traccia (chiamata a
+ogni fotogramma) e limita_accelerazione (saltata quando l'arresto fa `continue`).
+
+  ATTENZIONE, ERRORE GIA' FATTO: la prima versione intercettava passo_movimento,
+  che pero' _muovi_e_gestisci_stato chiama per OGNI PERSONA a ogni fotogramma. Il
+  marcatore veniva azzerato dalla folla e il banco riportava zero arresti ovunque.
+  limita_accelerazione e' invece chiamata solo per il robot, una volta per
+  fotogramma non arrestato.
+
+RISULTATO PARZIALE (12 corse su 18): 304 arresti, 48% frontali, 43% laterali,
+9% posteriori. La prima corsa dava 4 frontali su 15 e aveva suggerito una
+maggioranza laterale netta: con piu' dati non regge. Quindi il controllo di
+velocita' non poteva anticipare circa meta' degli arresti, ma sull'altra meta'
+li stava guardando e ha reagito male. Da rileggere sul totale.
+
+Varco libero medio ~3,1 m e nessun arresto in spazi stretti: lo spazio fisico
+per la manovra c'e', il che era la condizione che poteva escludere l'idea a priori.
+
+DA FARE
+  [ ] smoke test delle quattro condizioni (rimandato: la diagnosi occupava gli 8 core)
+  [ ] campagna appaiata base / solo_posizione sui dieci livelli, stessi semi
+  [ ] tarare RAGGIO_MANOVRA_PX, SIGMA_REPULSIONE_PX e PESO_RITORNO_PERCORSO solo
+      DOPO aver visto la prima misura, e su livelli diversi da quelli di verifica
+  [ ] nulla di tutto questo e' ancora misurato: il componente e' scritto, non validato
+
+
+================================================================================
+14. DIAGNOSI DEGLI ARRESTI: ESITO COMPLETO - 18 agosto 2026
+================================================================================
+
+18 corse, 3 livelli x 3 semi x 2 condizioni, 674 arresti classificati.
+
+  livello   condizione  arresti  frontali  laterali  posteriori  varco  stretti
+  pop169    base            53   23 (43%)  26 (49%)     4  (8%)  322 cm   0 (0%)
+  pop169    solo_velocita   52   20 (38%)  28 (54%)     4  (8%)  319 cm   1 (2%)
+  pop295    base            89   49 (55%)  30 (34%)    10 (11%)  305 cm   3 (3%)
+  pop295    solo_velocita  110   54 (49%)  48 (44%)     8  (7%)  301 cm   7 (6%)
+  pop422    base           180   87 (48%)  75 (42%)    18 (10%)  307 cm  10 (6%)
+  pop422    solo_velocita  190   91 (48%)  72 (38%)    27 (14%)  301 cm  16 (8%)
+  ------------------------------------------------------------------------------
+  complessivo             674  324 (48%) 279 (41%)    71 (11%)  ~307 cm  37 (5%)
+
+CORREZIONE DI UNA MIA IPOTESI. Avevo sostenuto, sulla base della prima corsa
+(4 frontali su 15), che gli arresti fossero in maggioranza laterali e che quindi
+il controllo di velocita' fallisse perche' "guarda dove non serve". Sui 674
+arresti non regge: i frontali sono il 48%, cioe' circa meta'. L'ipotesi vale per
+una meta' del fenomeno, non per il fenomeno.
+
+LETTURA CORRETTA - due meta' con cause diverse:
+
+  52% NON FRONTALI (laterali + posteriori). Il controllo di velocita' non poteva
+  vederli: proietta i conflitti lungo il percorso pianificato, e chi arriva di
+  fianco o da dietro non e' mai sul percorso. Qui nessuna taratura di soglie puo'
+  aiutare - serve un grado di liberta' in piu'.
+
+  48% FRONTALI. Il controllo li stava guardando e non li ha evitati. Il motivo
+  non e' che non li vede, e' che rallentare NON CREA DISTANZA: la persona
+  continua ad avvicinarsi, e il minimo del controllo e' 0,20 - non si ferma mai
+  da solo. Frenare sposta l'arresto piu' avanti nel tempo, non lo evita.
+
+Entrambe le meta' restano dunque scoperte dal componente attuale, e per ragioni
+diverse. Entrambe sono invece attaccabili da una traslazione laterale, che agisce
+direttamente sulla distanza - la grandezza che fa scattare l'arresto.
+
+LA QUOTA FRONTALE CRESCE CON LA DENSITA': 43% a pop169, 55% a pop295, 48% a
+pop422. In folla densa la gente davanti c'e' comunque; a densita' bassa gli
+arresti sono incontri occasionali che tagliano la strada di lato. Se regge, i due
+controlli coprono regimi diversi ed e' un motivo in piu' per misurarli separati.
+Con tre semi per livello, pero', questa e' una tendenza osservata, non stabilita.
+
+IL VINCOLO DI SPAZIO NON C'E'. Varco libero perpendicolare alla marcia ~3,1 m in
+media, e solo il 5% degli arresti avviene in spazi stretti (meno di 1 m totale).
+Era la condizione che poteva escludere a priori il controllo di posizione: non lo
+esclude. Lo spazio per manovrare c'e' nel 95% dei casi.
+
+DIFETTO DELLO SCRIPT, CORRETTO. La prima versione stampava le due conclusioni in
+coda SEMPRE, quali che fossero i numeri: diceva "frontali in minoranza" e "molti
+arresti in spazi stretti" anche con 48% e 5%. Ora le conclusioni sono condizionate
+alle soglie. Un banco che stampa la stessa morale qualunque cosa misuri non e' un
+banco, e' una decorazione.
+
+[2026-08-18] tesi/capitolo_ottimizzazione_griglie.tex - struttura
+Le voci interne, prima marcate con \paragraph, sono diventate \subsubsection: compaiono
+nell'indice e sono citabili, cosa che con \paragraph non accadeva. Dieci in tutto, tre per
+sottosezione salvo l'ultima che ne ha quattro.
+Due ritocchi minori richiesti dal cambio di livello:
+- "Che cosa il raffinamento non fa" -> "Cio' che il raffinamento non migliora" (un titolo di
+  indice non puo' essere una frase colloquiale) e prima riga riscritta, perche' "per contrasto"
+  si appoggiava al paragrafo precedente che ora e' separato da un titolo;
+- "Il collasso e cio' che delimita" -> "Il collasso sulla griglia di ricerca";
+- aggiunta una riga di apertura alla sottosezione sui limiti, che altrimenti cominciava con un
+  titolo di terzo livello senza testo intermedio.
+Nessuna modifica al contenuto tecnico ne' ai riscontri nel codice citati in testa al file.
+
+[2026-08-18] tesi/capitolo_ottimizzazione_griglie.tex - struttura, secondo passaggio
+Dieci sotto-sottosezioni erano troppe: ridotte a tre, tutte nella sezione sulle macchie, dove
+corrispondono alle tre proprieta' che rendono lecita la separazione fra le due risoluzioni
+(invarianza della forma, aggregazione per massimo, localita' del costo). Sono annunciate come
+elenco nel paragrafo che le precede, quindi i titoli riprendono qualcosa che il lettore ha gia'
+letto invece di spezzare il discorso.
+Le altre due sezioni tornano a prosa continua, con i raccordi rifatti dove il titolo reggeva il
+salto da un argomento all'altro ("insistono inoltre", "dal canto suo", "entro tali limiti").
+La dichiarazione sulla configurazione delle misure (raffinamento spento) resta l'ultimo
+paragrafo del capitolo: non ha piu' un titolo, ma sta nel posto dove si va a cercarla.
+Corretto per strada un accordo: "rende effettive l'anisotropia e la deformazione".
+
+[2026-08-19] ai_controllo/ - campagna di estensione conclusa, esito NULLO
+Aggiunte 48 coppie su semi disgiunti (estensione_ai.py, 96 corse, 8 livelli x 6 semi x 2 bracci)
+al confronto fra il controllo di velocita' col Kalman puro e lo stesso controllo con la
+previsione corretta dalla rete. Nuovo modulo ai_controllo/aggrega_ai.py per l'aggregazione delle
+tre campagne.
+Esito: su 82 coppie la distanza dalle persone e' -0,027 m con rapporto 0,57, cioe' NULLA. Il
++0,123 m a rapporto 2,30 della prima campagna (24 coppie) non e' stato replicato: le due
+campagne indipendenti danno -0,085 e -0,089 m. Nulle anche le altre quattro grandezze.
+E' il terzo effetto borderline della tesi caduto in replica, e va usato come tale nel capitolo:
+il tetto misurato dall'oracolo (+0,239 m a rapporto 1,92, gia' sotto soglia) rendeva l'esito
+prevedibile prima della misura.
+Registrato in tesi/capitolo_velocita_dati.txt come E11, con aggiornamento del quadro complessivo.

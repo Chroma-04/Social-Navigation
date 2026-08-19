@@ -1,0 +1,186 @@
+% Capitolo da inserire fra "Sicurezza e distanze nella navigazione sociale" e "Correzione
+% neurale della previsione di moto". I capitoli successivi slittano di uno.
+%
+% Riscontri nel codice (main.py):
+%   2155  algoritmo_a_star(griglia_robot, ...)      il robot cerca sulla griglia fine
+%   1118  _pool_worker_griglia da _celle_muro_di(griglia)   la folla cerca su quella grossa
+%   1995  celle bloccate del lidar sulla griglia fine       (varchi fra persone vicine)
+%   2109  rapporto_collasso = sottocelle_per_lato // fattore_robot
+%    309  costo_occupata = COSTO_CELLA_OCCUPATA * dim / DIM_NODO
+%   2110  costo_massimo_probabilita ... * dim_robot / DIM_NODO
+%   2132  costo_isteresi ... * dim_robot / DIM_NODO
+%   2032  costo_alone ... * dim_robot / DIM_NODO
+
+\section{Ottimizzazione della risoluzione delle griglie}
+\label{cap:ottimizzazione-griglie}
+
+I due capitoli precedenti hanno presentato la pianificazione e la rappresentazione del rischio
+come se entrambe insistessero sulla medesima discretizzazione dello spazio. Non è così, ed è una
+scelta deliberata: il sistema impiega tre risoluzioni distinte, ciascuna dimensionata sul
+requisito della componente che la utilizza.
+
+La ragione è che la risoluzione della griglia governa contemporaneamente due grandezze che si
+muovono in versi opposti. Da un lato la fedeltà con cui si rappresenta la geometria — la forma
+di una regione di rischio, l'esistenza di un varco fra due persone vicine — che migliora al
+diminuire del passo. Dall'altro il costo della ricerca del percorso, che cresce
+approssimativamente con il cubo dell'inverso del passo: dimezzare il lato della cella
+quadruplica i nodi da espandere e raddoppia i campioni richiesti da ciascun controllo di
+visibilità, operazione che assorbe la quasi totalità del tempo di pianificazione. Una griglia
+unica costringerebbe a scegliere un compromesso valido per tutti gli usi, e quindi ottimo per
+nessuno.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcl}
+\hline
+griglia & lato & impiego \\
+\hline
+ambiente & $\ell_0$ & muri, occupazione, pianificazione della folla \\
+ricerca del robot & $\ell_0/2$ & espansione dei nodi e controllo di visibilità del robot \\
+regione di rischio & $\ell_0/2k$ & propagazione delle macchie di probabilità \\
+\hline
+\end{tabular}
+\caption{Le tre risoluzioni impiegate. Ciascuna è un multiplo intero della successiva, così che
+il passaggio dall'una all'altra sia una divisione priva di resto.}
+\label{tab:tre-risoluzioni}
+\end{table}
+
+L'asimmetria fra robot e folla merita una parola. Le persone continuano a pianificare sulla
+griglia dell'ambiente, con il medesimo algoritmo any-angle impiegato dal robot ma senza alcun
+raffinamento. La scelta non è una semplificazione di comodo: la folla costituisce l'ambiente
+rispetto al quale il robot viene misurato, e raffinarne la pianificazione ne aumenterebbe il
+costo — che è già dominante, essendo le persone alcune centinaia contro un robot solo — senza
+incidere sulla grandezza in esame. Il raffinamento è speso dove se ne osserva l'effetto.
+
+Perché le tre risoluzioni possano coesistere deve però valere una condizione, che attraversa
+l'intero capitolo: \textbf{i costi non devono dipendere dalla risoluzione}. Se la penalità
+associata a una cella restasse la stessa al dimezzarsi del suo lato, attraversare una data
+distanza costerebbe il doppio, e raffinare la griglia equivarrebbe ad aumentare di nascosto la
+prudenza del robot. Ogni penalità è pertanto riscalata con il lato della cella cui è applicata,
+senza eccezioni: la cella occupata, la regione di rischio, lo sconto di isteresi sul percorso
+già intrapreso e l'alone attorno alle persone ferme. È questa invarianza a rendere la
+risoluzione un parametro libero anziché una manopola implicita sul comportamento.
+
+\subsection{Risoluzione della ricerca: la griglia del robot}
+\label{sec:griglia-robot}
+
+Il robot cerca il percorso su una griglia di lato dimezzato rispetto a quella dell'ambiente,
+ottenuta suddividendo ciascuna cella in quattro e replicandone il tipo: i muri sono gli stessi,
+soltanto descritti più finemente. Il guadagno non sta dunque nella geometria delle pareti, che è
+invariata, bensì nella granularità di tutto ciò che sulla griglia viene appoggiato.
+
+Il beneficio più rilevante riguarda l'occupazione. Le persone rilevate dal telemetro vengono
+marcate come celle non percorribili, e su una griglia il cui passo è confrontabile con
+l'ingombro di un pedone due persone vicine ma non a contatto occupano celle adiacenti,
+sigillando un passaggio che nello spazio continuo resta aperto. Sulla griglia dimezzata le
+medesime due persone lasciano fra sé celle libere, e il varco diventa percorribile. La
+differenza non è estetica: in un ambiente affollato la maggior parte delle alternative di
+percorso si gioca su passaggi di questa ampiezza, e sigillarli equivale a imporre al
+pianificatore deviazioni che la geometria reale non richiede.
+
+Sulla medesima griglia insistono inoltre l'alone di rispetto attorno alle persone ferme e lo
+sconto di isteresi applicato al percorso già intrapreso. Entrambi sono campi definiti su
+distanze dell'ordine del metro, e su celle di lato paragonabile risulterebbero quantizzati al
+punto da perdere il proprio significato: un alone che valga una sola cella non descrive una
+distanza di rispetto, descrive un ostacolo.
+
+Il raffinamento non migliora, per contro, la geometria del percorso. Il pianificatore è
+any-angle: produce tratti rettilinei a inclinazione arbitraria, non vincolati agli orientamenti
+della griglia, e questa proprietà non dipende dal passo. Ciò che cambia con la risoluzione è
+dove il percorso può passare — quali varchi esistono, quali celle costano — non con quale
+angolazione lo attraversa.
+
+\subsection{Risoluzione del rischio: la sotto-griglia delle macchie}
+\label{sec:sottogriglia-rischio}
+
+La regione di rischio pone un requisito ulteriore, e di natura diversa. Non è un insieme di
+celle occupate ma un oggetto geometrico: si allunga lungo la direzione di marcia, si piega
+attorno agli spigoli e si restringe in corrispondenza dei varchi. Ciascuna di queste proprietà è
+rappresentabile soltanto se la regione è descritta da un numero sufficiente di celle; su una
+griglia dal passo confrontabile con l'ingombro di una persona l'anisotropia degenera e la
+deformazione attorno a un angolo si riduce a un gradino.
+
+La macchia viene perciò propagata su una sotto-griglia di lato $\ell_0/2k$, con $k$ intero, e il
+risultato aggregato sulla griglia di ricerca prima che il pianificatore lo consumi. Il valore di
+$k$ è vincolato a rendere l'aggregazione una divisione intera, cosicché nessuna sotto-cella
+ricada a cavallo di due celle di decisione.
+
+Perché tale separazione sia legittima devono però valere tre proprietà, verificate nel seguito:
+che il raffinamento non alteri la regione che descrive, che l'aggregazione non introduca a sua
+volta una dipendenza dalla risoluzione, e che il costo aggiuntivo non ricada sulla componente
+che già domina il bilancio di calcolo.
+
+\subsubsection{Invarianza della forma}
+
+Il raffinamento deve modificare la fedeltà con cui la regione è descritta, non la regione
+stessa: diversamente $k$ diventerebbe una seconda manopola sull'estensione del rischio. Si è
+pertanto imposto che il raggio di propagazione, espresso in sotto-celle, scali con $k$, e che il
+decadimento per sotto-cella valga $\delta^{1/k}$. La seconda condizione discende dalla proprietà
+moltiplicativa del peso: essendo questo il prodotto dei decadimenti dei passi che vi conducono,
+elevare il fattore all'inverso di $k$ compensa esattamente il numero $k$ volte maggiore di passi
+necessari a coprire la medesima distanza. Estensione fisica e decadimento per unità di lunghezza
+restano dunque immutati: raffinando si ottiene la stessa macchia descritta meglio, non una
+macchia diversa.
+
+\subsubsection{Aggregazione per massimo}
+
+A ciascuna cella di ricerca è attribuito il massimo fra i pesi delle sotto-celle che la
+compongono. La somma renderebbe la penalità dipendente da $k$, crescendo il numero di addendi
+con $k^2$, e violerebbe l'invarianza posta in apertura. La media diluirebbe un picco genuino nel
+volume della cella che lo contiene: una sotto-cella a rischio elevato circondata da sotto-celle
+libere produrrebbe una cella di costo modesto, e il pianificatore l'attraverserebbe. Il massimo
+conserva invece la lettura conservativa — il punto peggiore che il robot incontrerebbe
+attraversando quella cella — ed è indipendente dalla risoluzione.
+
+\subsubsection{Località del costo}
+
+A differenza del raffinamento della ricerca, che è uniforme su tutta la mappa, questo è locale
+per costruzione: la propagazione si sviluppa attorno a ciascuna persona rilevata, entro un
+raggio limitato e con interruzione al di sotto di una soglia di peso trascurabile. Il suo costo
+è pertanto proporzionale al numero di persone percepite e non all'estensione dell'ambiente, e
+non ricade sulla ricerca del percorso, che continua a operare sulla propria griglia e a
+espandere il medesimo numero di nodi. Il raffinamento del rischio si paga soltanto dove un
+rischio esiste; lo spazio libero, che costituisce la maggior parte della mappa, resta descritto
+alla risoluzione grossolana che al pianificatore è sufficiente.
+
+\subsection{Limiti del raffinamento e configurazione impiegata}
+\label{sec:limiti-raffinamento}
+
+Le due sezioni precedenti hanno esposto ciò che il raffinamento consente. Questa espone il
+rovescio: perché non lo si estende a tutto lo spazio, quale porzione del beneficio
+l'aggregazione trattiene, e in quale configurazione il sistema è stato effettivamente misurato.
+
+La via apparentemente ovvia — portare tutto alla risoluzione più fine — è preclusa dal costo.
+L'onere della ricerca cresce all'incirca con il cubo dell'inverso del passo, e il profilo di
+esecuzione misurato su uno scenario denso colloca il 97\% del tempo di calcolo entro la ricerca
+di percorso e il 96\% di quest'ultimo entro il solo controllo di visibilità, invocato
+dell'ordine di venti milioni di volte in trecento fotogrammi. Il dimezzamento già adottato costa
+quindi, di per sé, circa otto volte la pianificazione sulla griglia dell'ambiente: stima
+ricavata dal prodotto fra il quadruplicarsi dei nodi e il raddoppiarsi dei campioni per
+controllo, non da una misura diretta. Un ulteriore dimezzamento porterebbe l'onere a due ordini
+di grandezza sopra la configurazione di partenza, a carico della componente che già domina il
+bilancio, e sarebbe incompatibile tanto con le risorse di un sistema a bordo quanto con
+l'esecuzione di campagne di validazione composte da centinaia di traversate appaiate.
+
+Il raffinamento del rischio, dal canto suo, produce una rappresentazione più fedele ma non
+abbassa la risoluzione alla quale il pianificatore decide: l'aggregazione riporta la macchia
+sulla griglia di ricerca, ed è lì che la decisione avviene.
+L'ottimizzazione migliora dunque la qualità dell'informazione trasmessa, non la finezza con cui
+essa può essere utilizzata. La distinzione risulterà determinante nell'analisi condotta in
+\S\ref{sec:dove-si-arresta}, dove si mostra che il guadagno di un'informazione più accurata si
+trasferisce alla decisione soltanto nella misura in cui supera la risoluzione alla quale la
+decisione è presa — soglia che il raffinamento della sola rappresentazione non sposta.
+
+Restano acquisiti, entro tali limiti, due benefici indipendenti dall'accuratezza della
+previsione e quindi non soggetti al vincolo appena descritto: l'apertura dei varchi fra corpi
+vicini, che amplia l'insieme dei percorsi disponibili in ambiente affollato, e la fedeltà
+geometrica delle regioni di rischio, che rende effettive l'anisotropia e la deformazione
+attorno agli ostacoli descritte nel capitolo precedente. Sono guadagni di rappresentazione, non di
+previsione, ed è opportuno tenerli distinti nella lettura dei risultati.
+
+Va infine dichiarato, per la corretta interpretazione dei capitoli successivi, che le campagne
+di misura ivi riportate sono state eseguite senza alcun raffinamento: griglia di ricerca
+coincidente con quella dell'ambiente e sotto-celle coincidenti con le celle di ricerca. I
+meccanismi descritti in questo capitolo appartengono dunque al sistema realizzato ma non sono
+esercitati da quei dati, e nessuna delle differenze misurate è loro attribuibile. La
+quantificazione del loro effetto sulle prestazioni resta fra gli sviluppi futuri.
