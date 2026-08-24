@@ -55,7 +55,7 @@ import training_scenari as ts
 from ai_predittiva.genera_dataset_previsione import (_ricalcola_percorsi, _muovi_e_gestisci_stato, _rileva_e_traccia,
                                        popolazione_da_totale, ACCELERAZIONE,
                                        POPOLAZIONE_MIN, POPOLAZIONE_MAX, POPOLAZIONE_PASSO)
-from ai_predittiva.allena_previsione import (CorrezioneKalman, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO,
+from ai_predittiva.allena_previsione import (CorrezioneKalman, modello_da_file, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO,
                                FILE_MODELLO_SPECIALIZZATO, DIMENSIONE_NASCOSTA, DIMENSIONE_NASCOSTA_SPECIALIZZATO)
 
 CARTELLA_RISULTATI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "risultati_test")
@@ -135,11 +135,7 @@ def _inizializza_worker():
               f"questo passo lavora fuori distribuzione. Allenalo con: "
               f"py allena_previsione.py --specializzato")
     path = FILE_MODELLO_SPECIALIZZATO if usa_specializzato else FILE_MODELLO
-    dimensione = DIMENSIONE_NASCOSTA_SPECIALIZZATO if usa_specializzato else DIMENSIONE_NASCOSTA
-    modello = CorrezioneKalman(dimensione_nascosta=dimensione)
-    modello.load_state_dict(torch.load(path, map_location="cpu"))
-    modello.eval()
-    _modello_ai_worker = modello
+    _modello_ai_worker = modello_da_file(path)
 
 
 # --------------------------------------------------------------------------------------------------

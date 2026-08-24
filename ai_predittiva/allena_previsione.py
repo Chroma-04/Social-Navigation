@@ -50,14 +50,35 @@ class CorrezioneKalman(nn.Module):
     """GRU leggera: legge lo storico (posizione relativa + velocita') e produce una correzione (dx, dy) da
     sommare alla previsione del Kalman. Volutamente piccola: il compito e' imparare solo lo scarto
     residuo (svolte, dinamiche di gruppo), non ripartire da zero come un modello puramente predittivo."""
-    def __init__(self, dimensione_input=4, dimensione_nascosta=DIMENSIONE_NASCOSTA):
+    def __init__(self, dimensione_input=4, dimensione_nascosta=DIMENSIONE_NASCOSTA, strati=1):
         super().__init__()
-        self.gru = nn.GRU(dimensione_input, dimensione_nascosta, batch_first=True)
+        self.gru = nn.GRU(dimensione_input, dimensione_nascosta, num_layers=strati, batch_first=True)
         self.testa = nn.Linear(dimensione_nascosta, 2)
 
     def forward(self, storico):
         _, h_finale = self.gru(storico)
-        return self.testa(h_finale.squeeze(0))
+        # h_finale ha forma (strati, lotto, unita'): serve lo stato dell'ultimo strato. A uno strato
+        # e' esattamente cio' che faceva la squeeze(0) precedente, quindi il modello dei capitoli 6
+        # e 7 continua a dare gli stessi identici numeri.
+        return self.testa(h_finale[-1])
+
+
+def modello_da_file(path, device="cpu"):
+    """Costruisce la rete deducendone la forma dai pesi salvati, invece di riceverla come parametro.
+
+    I modelli non hanno piu' tutti la stessa forma: quello usato nei capitoli 6 e 7 e' una GRU
+    96x1, quello ottenuto con arresto anticipato una 48x2. Passare unita' e strati a mano da tre
+    punti di chiamata sparsi in due file e' esattamente il tipo di duplicazione che finisce fuori
+    sincrono con il file che si sta davvero caricando; leggerli dallo state_dict no.
+    """
+    pesi = torch.load(path, map_location=device)
+    # la GRU numera gli strati nelle chiavi: weight_ih_l0, weight_ih_l1, ...
+    strati = 1 + max(int(k.rsplit("_l", 1)[1]) for k in pesi if k.startswith("gru.weight_ih_l"))
+    dimensione_nascosta = pesi["gru.weight_ih_l0"].shape[0] // 3   # reset, aggiornamento, candidato
+    modello = CorrezioneKalman(dimensione_nascosta=dimensione_nascosta, strati=strati)
+    modello.load_state_dict(pesi)
+    modello.eval()
+    return modello
 
 
 def carica_dataset(path):

@@ -387,6 +387,20 @@ E11. RETE NEURALE DENTRO IL CONTROLLO DI VELOCITA' (su C3)
     (i livelli sono 10 e non 8 perche' la replica ne aveva due piu' densi, pop379 e
      pop422, con una sola coppia ciascuno)
 
+  VERIFICA DELL'INNESTO (ai_controllo/diagnosi_innesto.py, una corsa strumentata)
+  Serve a distinguere "la rete non serve" da "la rete non viene applicata".
+    interrogazioni della previsione in una corsa   60.393
+    con correzione disponibile                     65,2% (il resto: persone ferme
+                                                   o tracce senza storico completo)
+    orizzonte di addestramento                     12 frame
+    orizzonti richiesti dal controllo              mediana 20, media 24,6
+    fattore di riscalamento applicato              medio 0,813; pieno nel 66,6%
+    ampiezza della correzione   grezza 51,3 cm -> applicata 41,5 cm
+    QUOTA DI RETE EFFETTIVAMENTE APPLICATA         80,8%
+  La rete entra a piena forza e sposta la posizione prevista di quasi mezzo metro,
+  su persone di 23 cm di raggio in corridoi di 3 m. L'esito nullo NON e' l'effetto
+  di un innesto depotenziato: e' l'esito della rete applicata.
+
   IL NUMERO CHE CHIUDE LA QUESTIONE
     scarto tipico della differenza per coppia   0,428 m
     intervallo al 95% sulla distanza            da -0,120 a +0,066 m
@@ -426,6 +440,106 @@ E11. RETE NEURALE DENTRO IL CONTROLLO DI VELOCITA' (su C3)
   le corse deterministiche a parita' di seme.
 
 
+--------------------------------------------------------------------------------
+E12. ORACOLO SUL CONTROLLO DI POSIZIONE (su C3)   >>> TETTO NULLO <<<
+--------------------------------------------------------------------------------
+  Cosa: la previsione che alimenta il controllo di POSIZIONE passa da Kalman puro
+        alla posizione futura vera. E' il tetto del secondo canale, mai misurato
+        prima: il punto di innesto e' distinto da quello del controllo di
+        velocita', quindi in TUTTE le campagne di E9 il controllo di posizione,
+        quando era acceso, ha continuato a girare su Kalman.
+  Come: nuovo hook sim.previsione_per_evitamento in main.py, gemello e indipendente
+        da previsione_per_controllo. ai_posizione/oracolo_posizione.py (innesto),
+        ai_posizione/misura_oracolo_posizione.py (campagna e tabelle).
+        8 livelli x 3 semi = 24 coppie, condizione 'solo_posizione'.
+  File: risultati_test/oracolo_posizione_orizzonte_reale_povo.csv   <- VALIDO
+        risultati_test/oracolo_posizione_povo.csv                   <- SUPERATO
+
+  ATTENZIONE: LA PRIMA CAMPAGNA E' STATA SCARTATA. Vedi in fondo alla voce.
+  Tutti i numeri qui sotto sono a orizzonte corretto (12 passi = 1 s).
+
+  A) CONTROLLO DI POSIZIONE contro RIFERIMENTO, 24 coppie. Segno + = meglio
+    tempo trascorso fermo    +2,90 s    rapporto 3,76  8/8 p=0,0078  STABILITO
+    numero di fermate        +4,42      rapporto 2,36  7/8           STABILITO
+    distanza dalle persone   +0,249 m   rapporto 2,40  7/8           STABILITO
+    tempo di percorrenza     -12,10 s   rapporto 3,35  3/8           STABILITO, costo
+    lunghezza del percorso   -6,73 m    rapporto 2,52  1/8           STABILITO, costo
+    velocita' media          -0,016 m/s rapporto 1,77                tendenza
+
+  B) ORACOLO contro CONTROLLO DI POSIZIONE  >>> E' IL TETTO <<<
+    numero di fermate        -0,58      rapporto 0,31  IC [-4,26, +3,09]   NULLO
+    tempo trascorso fermo    +0,03 s    rapporto 0,04  IC [-1,36, +1,42]   NULLO
+    tempo di percorrenza     +2,46 s    rapporto 0,72  IC [-4,27, +9,18]   NULLO
+    distanza dalle persone   +0,003 m   rapporto 0,04  IC [-0,146, +0,153] NULLO
+    velocita' media          -0,013 m/s rapporto 1,43                      tendenza
+    lunghezza del percorso   +3,71 m    rapporto 1,98                      tendenza
+    Nessun livello arriva a 6/8 su nessuna grandezza. Il tetto e' ZERO.
+
+  C) ORACOLO contro RIFERIMENTO (controllo + previsione perfetta insieme)
+    distanza dalle persone   +0,252 m   rapporto 5,21  8/8 p=0,0078  STABILITO
+    tempo trascorso fermo    +2,92 s    rapporto 4,79  8/8 p=0,0078  STABILITO
+    numero di fermate        +3,83      rapporto 3,23  7/8           STABILITO
+    tempo di percorrenza     -9,64 s    rapporto 2,89  0/8 p=0,0078  STABILITO, costo
+    Tutto cio' che il braccio C guadagna, lo guadagna gia' il braccio A: e' il
+    CONTROLLO a produrlo, non la previsione.
+
+  LETTURA: identica a quella del canale velocita' (E9), su un canale
+  strutturalmente diverso. Il controllo di posizione funziona - riduce fermate e
+  tempo fermo, compra 25 cm di distanza, e li paga con 12 s di percorrenza - ma
+  sostituire la sua previsione con quella PERFETTA non aggiunge niente su nessuna
+  delle sei grandezze. Il limite e' nella struttura del controllo, non
+  nell'informazione che riceve. Con due canali che scelgono grandezze diverse (uno
+  uno scalare di velocita', l'altro una direzione) e lo stesso esito, la
+  conclusione non e' piu' su un controllo: e' sul sistema.
+  CONSEGUENZA DIRETTA: innestare la rete nel controllo di posizione e' escluso
+  senza doverlo provare. Una frazione di un tetto nullo e' nulla. L'oracolo qui
+  funziona da STRUMENTO DI SCREENING - 24 corse chiudono una linea di lavoro che
+  sarebbe costata settimane di addestramento.
+
+  ---- PRIMA CAMPAGNA, SCARTATA: L'ORIZZONTE GONFIATO ----
+  La campagna iniziale (oracolo_posizione_povo.csv) dava un tetto NEGATIVO:
+  fermate -4,17 rapporto 1,71, tempo -6,42 s rapporto 1,82, velocita' media -0,024
+  STABILITA in peggioramento. Era un artefatto.
+  CAUSA: offset_evitamento_predittivo legge PREVISIONE_EVITAMENTO_FRAME in passi di
+  simulazione e non lo divide per ACCELERAZIONE, mentre la macchia del pianificatore
+  lo fa (testing.py:258). Sul banco accelerato il controllo guardava 5 s avanti
+  invece di 1 s. A 5 s la posizione vera diverge dalla retta del Kalman molto piu'
+  che a 1 s, e il robot si scansava da conflitti che a un secondo non erano
+  conflitti: l'orizzonte gonfiato danneggiava quasi solo il braccio ORACOLO.
+  PROVA, sulle stesse 21 coppie appaiate (pop337 escluso, mancante al momento del
+  confronto), tempo di percorrenza:
+    orizzonte 5 s   oracolo - controllo   +5,73 s   rapporto 1,43
+    orizzonte 1 s   oracolo - controllo   +0,03 s   rapporto 0,01
+    effetto sui bracci   kalman  157,97 -> 156,31 s  (-1,66)
+                         oracolo 163,70 -> 156,34 s  (-7,36)
+  LEZIONE METODOLOGICA, da riportare in tesi: un confondente puo' essere appaiato e
+  corretto in ogni altro aspetto e produrre lo stesso un risultato falso, purche'
+  agisca in modo asimmetrico sui bracci. Qui l'appaiamento era esatto, i semi
+  disgiunti, il criterio fissato prima - e il verdetto era comunque sbagliato.
+  Ha retto solo perche' il confondente era stato DICHIARATO al momento della prima
+  misura e poi verificato invece che archiviato.
+
+  ---- DIAGNOSI DEL MECCANISMO (ai_posizione/diagnosi_balbettio.py) ----
+  Eseguita a orizzonte 60 per capire il peggioramento poi rivelatosi artefatto.
+  Resta valida come misura del comportamento del Kalman a orizzonte lungo, non come
+  spiegazione di una differenza di prestazioni, che a orizzonte corretto non esiste.
+    salto del punto previsto fra fotogrammi   kalman 25,19 px -> oracolo 7,94 px
+    inversioni di manovra (oltre 90 gradi)    kalman   5,2%  -> oracolo  1,5%
+    fotogrammi con manovra                    1511 -> 1847 (+22%)
+    modulo della manovra   1,25 px in ENTRAMBI: e' il tetto, sempre saturato
+  Il Kalman proietta in retta, quindi a 60 passi moltiplica per 60 il rumore della
+  velocita' stimata dal lidar: e' lui la previsione instabile, non quella vera.
+  E il modulo saturato dice che la previsione non puo' far muovere il robot di piu',
+  solo cambiargli direzione e frequenza. Vale a qualunque orizzonte.
+
+  INCOMPLETEZZA DEL CONTROLLO, individuata dalla misura e NON corretta:
+  il punteggio pesa il rischio e lo scostamento dal percorso, ma non la perdita di
+  avanzamento che la manovra comporta. Un candidato perpendicolare e uno all'indietro
+  distano uguale dal segmento e pagano uguale, ma il secondo annulla l'avanzamento.
+  DA FARE, se un giorno serve: terzo termine di costo cinematico nel punteggio,
+  condizione nuova accanto a solo_posizione per non invalidare l'archivio, 24 corse.
+
+
 ================================================================================
 4. QUADRO COMPLESSIVO
 ================================================================================
@@ -455,6 +569,11 @@ NULLO (rapporto sotto 1,3, misurato e non "non misurato")
     rapporto 1,62, 21 coppie vinte su 50. Tutto il guadagno di velocita_libera
     viene dal ramo dello sprint, non dall'anticipazione dei conflitti
   - oracolo sul controllo di velocita': TETTO DIMOSTRATO DI ZERO (vedi E9)
+  - oracolo sul controllo di POSIZIONE: TETTO DIMOSTRATO DI ZERO (vedi E12), su
+    tutte e sei le grandezze e con nessun livello sopra 5/8. Stesso esito del canale
+    velocita' su un canale che sceglie una direzione invece di uno scalare: il
+    limite e' del sistema, non del singolo controllo. Esclude l'innesto della rete
+    senza doverlo provare
   - rete neurale dentro il controllo di velocita': nulla su 82 coppie e su tutte e
     cinque le grandezze (vedi E11). Il tetto di E9 era gia' sotto il rumore, quindi
     l'esito era prevedibile prima di misurarlo - ed e' stato previsto
@@ -580,3 +699,540 @@ e nessuno se ne accorge.
   [ ] riallenare l'AI se la si vuole usare: le velocita' sono cambiate due volte,
       il modello attuale lavora fuori distribuzione
   [ ] committare il codice: le misure attuali non sono riproducibili da un hash
+
+
+--------------------------------------------------------------------------------
+E13. PROTOCOLLO DI ADDESTRAMENTO: ARRESTO ANTICIPATO   >>> 12,1% -> 20,7% <<<
+--------------------------------------------------------------------------------
+  Cosa: il modello dei capitoli 6 e 7 non e' limitato dall'architettura ne' dai
+        dati, ma dal PROTOCOLLO. allena_previsione.py allena per un numero fisso
+        di epoche, valuta una sola volta alla fine e salva i pesi dell'ULTIMA
+        epoca. Non ha validazione per epoca, ne' arresto, ne' checkpoint: non ha
+        modo di accorgersi di quando la rete smette di imparare struttura e
+        comincia a memorizzare il rumore del lidar.
+  Come: divisione in TRE parti. Il test della tesi resta quello di
+        allena_previsione (stesso seme 0, stessa frazione), e viene ESCLUSO; il
+        resto si divide in addestramento (70.065) e selezione (17.692) con seme
+        7. La selezione sceglie epoca e configurazione, il test non partecipa a
+        nessuna decisione. Cosi' l'affermazione della 5.2.8 - "quei dati sono
+        impiegati una sola volta" - resta vera.
+  File: ai_predittiva/sweep_capacita.py        (diagnosi e scelta della forma)
+        ai_predittiva/allena_con_arresto.py    (addestramento definitivo)
+        ai_predittiva/modelli/correzione_kalman_specializzato_v2.pt
+
+  A) LA DIAGNOSI: il modello della tesi e' SOVRADDESTRATO di un ordine di grandezza
+    GRU 96x1, 60 epoche, misura sulla selezione ad ogni epoca:
+      minimo dell'errore di verifica   epoca 18   +19,51%
+      valore all'ultima epoca                     +14,31%
+    L'addestramento della tesi prosegue fino alla 150. Le epoche dalla 19 in poi
+    non aggiungono nulla e tolgono cinque punti: la perdita di ADDESTRAMENTO
+    continua a scendere (899 -> 410) mentre quella di verifica risale.
+
+  B) LA CAPACITA' NON E' IL VINCOLO. Sweep, guadagno migliore sulla selezione:
+      GRU  16 x 1     1.090 par.   +16,67%   epoca 53
+      GRU  32 x 1     3.714 par.   +18,28%   epoca 49
+      GRU  48 x 1     7.874 par.   +19,00%   epoca 35
+      GRU  96 x 1    29.570 par.   +19,51%   epoca 18   <- forma della tesi
+      GRU 192 x 1   114.434 par.   +19,33%   epoca 12
+      GRU  96 x 2    85.442 par.   +19,88%   epoca 12
+    Allargare lo strato NON serve: la 192x1 fa peggio della 96x1 con quattro volte
+    i parametri. Aggiungere uno strato serve, di poco. Piu' capacita' = solo un
+    minimo di verifica raggiunto prima.
+
+  C) IL MEZZO PUNTO DELLA PROFONDITA' E' REALE, non rumore di inizializzazione.
+    Tre semi, 30 epoche, guadagno migliore sulla selezione:
+      GRU  96 x 1   19,51  19,65  18,91   media 19,36   escursione 0,74
+      GRU  96 x 2   19,88  19,90  20,14   media 19,97   escursione 0,26
+      GRU  96 x 3   19,63  19,74  19,68   media 19,68   escursione 0,11
+      GRU  48 x 2   20,15  20,03  19,56   media 19,91   escursione 0,59
+      GRU 192 x 2   19,92  19,45  20,13   media 19,83   escursione 0,68
+    Il seme PEGGIORE della 96x2 batte il seme MIGLIORE della 96x1: gli intervalli
+    non si sovrappongono, e la rete a due strati e' anche piu' stabile. Oltre due
+    strati non si guadagna nulla. Fra le quattro configurazioni a due strati la
+    differenza e' invece dentro il rumore (19,68-19,97): la scelta e' allora di
+    PARSIMONIA, e va alla 48x2, che ha un quarto dei parametri della 96x2.
+
+  D) MODELLO DEFINITIVO: GRU 48 x 2, 21.986 parametri.
+    Addestramento con pazienza 15 su 150 epoche consentite: arrestato all'epoca
+    33, pesi conservati quelli dell'epoca 18. 48 secondi su GPU.
+
+  E) MISURA FINALE, UNA VOLTA SOLA, su insiemi mai usati in alcuna decisione.
+    Riduzione dell'errore medio di previsione rispetto al solo Kalman:
+      insieme              campioni   tesi (96x1)   nuovo (48x2)
+      test della tesi        23.590      +12,11%       +20,72%
+      Povo                  160.189     +12,49%       +20,18%
+    In pixel, sul test:  Kalman 35,94 -> tesi 31,59 -> nuovo 28,50
+                mediano  27,78 -> 21,75      90-esimo  78,65 -> 63,67
+    I due insiemi sono ora BRUCIATI: ogni ulteriore confronto su di essi va
+    dichiarato ottimistico.
+
+  LETTURA: otto punti e mezzo di guadagno, con MENO parametri (21.986 contro
+  29.570), senza un dato nuovo e senza un'idea architetturale nuova. Sono venuti
+  per intero dal protocollo: validare ad ogni epoca, tenere l'epoca migliore,
+  fermarsi. E il guadagno replica su due insiemi indipendenti a mezzo punto di
+  distanza (20,72 e 20,18), quindi non e' fortuna della divisione.
+  IMPLICAZIONE PER LA TESI: il 12,1% del capitolo 5 non e' il limite di questa
+  rete su questi dati, e' il limite di quel ciclo di addestramento. Va detto.
+
+  CONSEGUENZE, DA NON DIMENTICARE:
+  1. Le campagne dei capitoli 6 e 7 NON si aggiornano da sole. Sono state eseguite
+     con correzione_kalman_specializzato.pt e restano valide come sono; il modello
+     nuovo e' un file distinto e i due convivono. Rifare quelle campagne e' una
+     scelta separata, con il suo costo in corse.
+  2. Il tetto dell'oracolo NON si sposta. E9 dice che con previsione PERFETTA il
+     canale velocita' da' al massimo +2,3% sui tempi: passare da 12 a 21 punti di
+     qualita' della previsione muove il robot dentro quel tetto, non oltre. E sul
+     canale posizione (E12) il tetto e' zero, quindi li' non cambia nulla per
+     costruzione. Il risultato negativo della tesi REGGE, e anzi si rafforza:
+     ora vale contro una previsione quasi doppiamente accurata.
+  3. Il caricamento del modello e' stato reso indipendente dalla forma:
+     allena_previsione.modello_da_file deduce unita' e strati dallo state_dict.
+     CorrezioneKalman ha ora un parametro strati=1 e usa h_finale[-1] al posto di
+     squeeze(0) - identico a uno strato, quindi il modello della tesi da' gli
+     stessi identici numeri. Toccati main.py, testing.py, analisi_stratificata.py.
+
+  DA FARE, se si vuole capitalizzare:
+  [ ] campagna 24 corse con il modello v2 sul canale velocita', condizione nuova
+      accanto a quelle in archivio. Attesa: dentro il tetto di +2,3%, cioe'
+      probabilmente ancora indistinguibile da zero. E' proprio questa la prova
+      che chiude il cerchio - qualita' della previsione quasi raddoppiata,
+      guadagno di sistema ancora nullo.
+
+
+--------------------------------------------------------------------------------
+E14. LA RETE MIGLIORE NON COMPRA SPAZIO   >>> TUTTO NULLO, E GLI 8 cm NON CI SONO <<<
+--------------------------------------------------------------------------------
+  Cosa: la rete v2 di E13 riduce l'errore di previsione del 20,7% invece del 12,1%.
+        Quei nove punti in piu' si convertono nel MARGINE SPAZIALE che la Tabella 4
+        attribuisce alla correzione neurale (+5,2%, 8 cm, tendenza)?
+  Come: tre bracci sugli STESSI semi, cosi' il confronto v2 contro v1 e' appaiato e
+        la varianza di scena si cancella. I due bracci con rete girano nella stessa
+        condizione del simulatore ('solo_ai'): cambia solo il file dei pesi,
+        scambiato dentro il worker. Il riferimento e' 'base', Kalman puro.
+        30 semi x 3 = 90 corse, 89,7 min, 8 processi.
+  File: ai_predittiva/sicurezza_modello_v2.py
+        risultati_test/sicurezza_modello_v2_povo.csv
+  Semi: indici 80-109, DISGIUNTI dalla prima campagna (0-29) e dalla replica (30-79).
+  Scala: 30 px/m. Il banco originale (TEST/test_sicurezza_povo.py) usa 60 px/m,
+        ereditati da quando una cella valeva mezzo metro: le distanze in archivio
+        sono DIMEZZATE rispetto alla scala dichiarata in tesi, e vanno raddoppiate
+        prima di confrontarle. Gli 8 cm della Tabella 4 sono gia' il valore corretto.
+
+  A) RETE v1 (+12,1%) contro RIFERIMENTO
+    distanza media       1,537 -> 1,508 m   -0,029   err 0,032   rapp 0,90   13/30  NULLO
+    distanza minima      0,043 -> 0,043 m   -0,000   err 0,004   rapp 0,01    7/30  NULLO
+    frame sotto 0,5 m    43,78 -> 43,93 %   -0,16    err 0,93    rapp 0,17   14/30  NULLO
+    jerk medio            7,39 ->  7,39     -0,003   err 0,101   rapp 0,03   15/30  NULLO
+    tempo                169,5 -> 171,3 s   -1,79    err 1,75    rapp 1,02   12/30  NULLO
+
+  B) RETE v2 (+20,7%) contro RIFERIMENTO
+    distanza media       1,537 -> 1,541 m   +0,004   err 0,035   rapp 0,12   16/30  NULLO
+    distanza minima      0,043 -> 0,043 m   +0,000   err 0,003   rapp 0,10   10/30  NULLO
+    frame sotto 0,5 m    43,78 -> 43,74 %   +0,04    err 1,144   rapp 0,04   14/30  NULLO
+    jerk medio            7,39 ->  7,26     +0,131   err 0,101   rapp 1,30   20/30  tendenza
+    tempo                169,5 -> 172,9 s   -3,45    err 2,341   rapp 1,47   13/30  tendenza, costo
+
+  C) RETE v2 contro RETE v1   >>> LA DOMANDA <<<
+    distanza media       1,508 -> 1,541 m   +0,033   err 0,038   rapp 0,87   19/30  NULLO
+    distanza minima      0,043 -> 0,043 m   +0,000   err 0,004   rapp 0,09    8/30  NULLO
+    frame sotto 0,5 m    43,93 -> 43,74 %   +0,20    err 1,397   rapp 0,14   15/30  NULLO
+    jerk medio            7,39 ->  7,26     +0,134   err 0,118   rapp 1,14   18/30  tendenza
+    tempo                171,3 -> 172,9 s   -1,66    err 2,591   rapp 0,64   12/30  NULLO
+
+  LETTURA, DUE RISULTATI DISTINTI.
+  1. LA RETE MIGLIORE NON E' PEGGIORE, ma nemmeno migliore. Su tutte e cinque le
+     grandezze il confronto v2 contro v1 e' indistinguibile da zero. Quasi
+     raddoppiare l'accuratezza della previsione (12,1% -> 20,7%) non sposta niente
+     di cio' che il robot fa. E' la conferma piu' diretta possibile della tesi
+     centrale: il guadagno di previsione non si converte in comportamento.
+  2. GLI 8 cm DELLA TABELLA 4 NON REPLICANO. Su queste 30 scene la rete v1 da'
+     -2,9 cm invece di +7,7. E la campagna AVEVA la potenza per vederli: l'errore
+     standard e' 0,032 m, quindi un effetto da 8 cm sarebbe uscito a rapporto 2,5.
+     Non e' un test troppo debole, e' un effetto che non c'e'.
+     E' il QUINTO effetto di questo lavoro che cade alla replica su semi disgiunti.
+
+  CAUTELA, DA DICHIARARE: il braccio v1 di qui NON e' una replica stretta delle due
+  campagne in archivio. Quelle giravano su una geometria precedente (tempi medi 53 s
+  contro i 169 di adesso, dopo l'introduzione della planimetria realistica di Povo).
+  Le distanze medie sono invece vicine (1,47 m riscalati contro 1,54). Quindi la
+  frase corretta e' "sulla mappa attuale l'effetto non c'e'", non "l'effetto di
+  allora era falso": sono condizioni diverse, e nessuna delle due misura e' sbagliata.
+
+  CONSEGUENZA PER LA TESI:
+  - La riga "margine spaziale medio +5,2% (8 cm) - tendenza" della Tabella 4 non e'
+    piu' sostenibile come tendenza in favore dell'AI. Va portata a "non confermato in
+    replica / non stabilito", accanto a quella dell'esposizione alla prossimita'.
+  - Il modello v2 NON va innestato: non c'e' motivo, non guadagna nulla. Resta un
+    risultato sul PROTOCOLLO di addestramento (E13), non sul sistema.
+  - Nessun numero dei capitoli 6 e 7 cambia: quelle campagne girano sul modello v1 e
+    restano quelle che sono.
+
+
+--------------------------------------------------------------------------------
+E15. LE DUE RETI DENTRO IL CONTROLLO DI VELOCITA'   >>> NESSUNA DIFFERENZA <<<
+--------------------------------------------------------------------------------
+  Cosa: stessa domanda di E14 sull'altro canale. La rete v2 (previsione +20,7%)
+        batte la v1 (+12,1%) quando alimenta sim.previsione_per_controllo?
+        E11 aveva dichiarato fra i propri limiti la qualita' del modello: "un
+        esito nullo va letto come 'questo modello non aiuta', non come 'nessun
+        modello aiuterebbe'". Questa campagna toglie di mezzo quel limite per
+        misura invece che per ipotesi.
+  Come: tre bracci sulle STESSE 24 scene (8 livelli x 3 semi), condizione
+        'velocita_libera'. I due bracci con rete differiscono per il solo file
+        dei pesi, scambiato dentro il worker. RIFATTO ANCHE IL RIFERIMENTO, non
+        ripreso dall'archivio come in E11: appaiare corse di epoche diverse e' il
+        confondente che in E12 aveva gia' prodotto un verdetto falso.
+        72 corse, 37,9 min, 8 processi.
+  File: ai_controllo/ai_velocita_v2.py
+        risultati_test/ai_velocita_v2_povo.csv
+
+  VERIFICA DI RIPRODUCIBILITA' GRATUITA: il braccio riferimento da' 131,069 s
+  contro i 131,07 della tabella 8 della tesi sulle stesse scene. Il determinismo
+  regge e la geometria di questa condizione non e' cambiata.
+
+  A) RETE v1 (+12,1%) contro RIFERIMENTO
+    tempo di percorrenza   131,07 -> 135,06 s  -3,99   err 3,86   rapp 1,03   9/24
+    tempo trascorso fermo    8,17 ->   9,13 s  -0,96   err 0,80   rapp 1,20  11/24
+    numero di fermate       17,38 ->  18,67    -1,29   err 1,54   rapp 0,84  11/24
+    distanza dalle persone  1,806 ->  1,929 m  +0,123  err 0,053  rapp 2,30  19/24
+    velocita' media         1,001 ->  0,983    -0,019  err 0,017  rapp 1,11   9/24
+
+  B) RETE v2 (+20,7%) contro RIFERIMENTO
+    tempo di percorrenza   131,07 -> 136,04 s  -4,97   err 3,62   rapp 1,37  10/24
+    tempo trascorso fermo    8,17 ->   8,93 s  -0,76   err 0,96   rapp 0,80  13/24
+    numero di fermate       17,38 ->  19,63    -2,25   err 1,51   rapp 1,49  10/24
+    distanza dalle persone  1,806 ->  2,003 m  +0,197  err 0,110  rapp 1,80  14/24
+    velocita' media         1,001 ->  0,957    -0,044  err 0,022  rapp 2,01   9/24
+
+  C) RETE v2 contro RETE v1   >>> LA DOMANDA <<<
+    tempo di percorrenza   135,06 -> 136,04 s  -0,98   err 4,20   rapp 0,23  11/24  NULLO
+    tempo trascorso fermo    9,13 ->   8,93 s  +0,20   err 1,11   rapp 0,18  11/24  NULLO
+    numero di fermate       18,67 ->  19,63    -0,96   err 1,91   rapp 0,50   8/24  NULLO
+    distanza dalle persone  1,929 ->  2,003 m  +0,074  err 0,111  rapp 0,67  13/24  NULLO
+    velocita' media         0,983 ->  0,957    -0,026  err 0,020  rapp 1,24  10/24  NULLO
+    Test dei segni: mai oltre 5/8 livelli. Nessun andamento con la densita'.
+
+  LETTURA. Il limite dichiarato in E11 e' tolto: non era il modello. Quasi
+  raddoppiare l'accuratezza della previsione (12,1% -> 20,7%) non sposta NIENTE
+  su nessuna delle cinque grandezze, su un canale strutturalmente diverso da
+  quello di E14. Due canali, due reti, dieci confronti: tutti nulli.
+
+  ATTENZIONE, IL +0,123 m DEL BRACCIO A NON E' UNA NUOVA PROVA. E' la
+  RIPRODUZIONE della prima campagna di E11 (+0,123 m, rapporto 2,30) sulle stesse
+  identiche 24 scene: stesso banco, stessi semi, stesso risultato. E11 ha gia'
+  mostrato che quell'effetto NON replica su semi disgiunti (-0,085 e -0,089 su
+  due campagne indipendenti, aggregato -0,027 a rapporto 0,57). Riprodurlo qui
+  conferma il determinismo del simulatore, non l'esistenza dell'effetto.
+
+  L'UNICA GRANDEZZA VICINA ALLA SOGLIA e' la velocita' media della v2 contro il
+  riferimento: -0,044 m/s a rapporto 2,01. E' un COSTO, non un guadagno, e ha la
+  stessa firma dell'oracolo di E9: la previsione migliore riconosce piu' conflitti
+  reali, rallenta di piu' e compra un po' di spazio pagandolo in tempo. La rete v2
+  si comporta come una frazione dell'oracolo, esattamente come previsto - solo che
+  l'oracolo stesso ha tetto nullo sui tempi, quindi la frazione non porta da
+  nessuna parte.
+
+  CONSEGUENZA PER LA TESI: nessun numero cambia. La v2 non va innestata su nessuno
+  dei due canali. Il risultato negativo della tesi esce RAFFORZATO: vale ora anche
+  contro una previsione quasi doppiamente accurata, e la frase del capitolo 9 -
+  "il limite non sta nell'informazione di cui dispone, ma nella struttura con cui
+  la usa" - ha una verifica in piu' che al momento della stesura non aveva.
+
+
+--------------------------------------------------------------------------------
+E16. CONVERSIONE DELLA TESI ALLA RETE v2   >>> TUTTI I NUMERI RIFATTI <<<
+--------------------------------------------------------------------------------
+  Cosa: sostituiti in tesi tutti i dati prodotti con correzione_kalman_specializzato.pt
+        (+12,1%) con quelli di ..._v2.pt (+20,7%). Il braccio di riferimento non e'
+        stato rifatto: la cinematica del capitolo 6 e' ripristinabile dentro il
+        worker e riproduce l'archivio al centesimo di secondo (46,92 contro 46,92).
+  File: ai_predittiva/cap6_tempi_v2.py cap6_sicurezza_v2.py cap6_lidar_v2.py
+        ai_predittiva/tabelle_v2.py
+        ai_controllo/ai_velocita_v2_completo.py robustezza_v2.py diagnosi_innesto.py --v2
+
+  A) CAPITOLO 5. test 23.590 campioni: 1,20/0,93/2,62 -> 0,95/0,73/2,12 m
+     riduzioni 20,7 / 21,7 / 19,0 %  (tesi 96x1: 12,1 / 16,2 / 8,3)
+     La coda passa da 8,3% a 19,0%: il guadagno diventa UNIFORME sulla distribuzione.
+     Ampiezza correzioni: 0,76 m media, 0,60 mediana, 56,6% > mezza cella,
+     29,0% > cella, avvicinamento 0,25 m. Rapporto ampiezza/utile 3,0 (era 6,2).
+     Povo 160.189 campioni: 20,2% totale; 17,9-21,2% su SETTE livelli, pop150 11,1%.
+
+  B) CAPITOLO 6, tabella 3, 150 corse. AGGREGATO +0,43% IC [-0,86, +1,72]  NULLO
+       12,7 pers  47,99 -> 48,19 s  rapp 0,53  21/50
+       16,0 pers  52,26 -> 51,03 s  rapp 1,10  17/30
+       17,5 pers  53,11 -> 52,51 s  rapp 0,99  27/50
+       aperta     40,10 -> 39,90 s  rapp 0,54   8/20
+     Mediane -0,50 / +0,67 / +0,25 s. Le due righe positive sono trascinate da una
+     ripetizione estrema ciascuna (+26,25 e +14,17 s).
+
+  C) CAPITOLO 6, tabella 4, 80 corse.  >>> IL MARGINE SPAZIALE CADE <<<
+       distanza media   v1  1,436 -> 1,511 m  +5,2%  rapp 1,98  48/80  tendenza
+                        v2  1,436 -> 1,453 m  +1,2%  rapp 0,50  38/80  NULLO
+       esposizione      v2  -2,5%  rapp 1,33   NULLO   (v1 -4,3% rapp 2,18)
+       jerk             v2  -0,7%  rapp 0,40   NULLO
+     Gli "8 cm" della tabella 4 non sono un guadagno perso: non c'erano. Erano gia'
+     sotto soglia (1,98) e gia' falliti in replica su 30 semi disgiunti (-2,9 cm).
+     CONSEGUENZA: cade il capoverso del 6.4 "il guadagno riemerge nel margine
+     spaziale". Sostituito con "non riemerge in alcuna grandezza comportamentale",
+     coerente con i due tetti nulli dei capitoli 7 e 8.
+
+  D) CAPITOLO 6, tabella 6, sweep lidar, 40 corse.
+       4,09 m  -0,1% (0,05)  |  6,00 m  -3,0% (2,16)
+      10,00 m  -3,6% (1,33)  | 16,00 m  -0,6% (0,21)     aggregato -1,83% (1,59)
+     ERRORE MIO, TROVATO E CORRETTO: la prima esecuzione passava il raggio
+     ARROTONDATO dell'archivio (122,6 px) invece di quello vero della geometria
+     salvata (122,647). Non era appaiata: dava -2,3% con rapporto 3,77. Con il
+     raggio esatto diventa -0,1% rapporto 0,05. cap6_lidar_v2._corsa ora riceve
+     (chiave_archivio, raggio_vero) e usa il secondo.
+
+  E) CAPITOLO 7, tabella 9, 82 coppie.  TUTTO NULLO
+       tempo    137,83 -> 137,49 s  -0,35  IC [-4,90, +4,21]  rapp 0,15  43,9%
+       fermate   19,44 ->  19,65    +0,21  IC [-1,43, +1,85]  rapp 0,25  41,5%
+       fermo      9,66 ->   9,43 s  -0,23  IC [-1,30, +0,84]  rapp 0,42  51,2%
+       distanza  1,899 ->  1,913 m  +0,014 IC [-0,094,+0,121] rapp 0,25  52,4%
+     Diagnosi innesto v2: 50.257 interrogazioni, 67,9% con correzione, quota
+     applicata 81,6%, spostamento 36,4 cm. La rete arriva alla decisione.
+     Potenza: scarto per coppia 0,495 m (era 0,428), risoluzione a 82 coppie
+     10,9 cm, effetto atteso 4,1 cm, coppie necessarie 583 (era 1140).
+
+  F) ROBUSTEZZA (ai_controllo/robustezza_v2.py, 11 criteri sulla distanza).
+     Con v1: tutte negative, nessuna sopra 1,36. Con v2: da -1,0 a +10,5 cm,
+     NOVE su undici positive, e la restrizione alle 25 scene piu' dense da'
+     +10,5 cm con rapporto 2,45.
+     ATTENZIONE: il taglio "distanza < 1,2 m" e' un criterio AGGIUNTO da me, non
+     uno dei sei nominati in tesi. E' un sottogruppo post-hoc: va trattato come
+     ipotesi, non come risultato. Verificabile su semi disgiunti, ~40-50 coppie.
+     E' l'unico punto del lavoro dove la v2 potrebbe dare un POSITIVO.
+
+  G) CAPITOLO 8: INVARIATO. Nessun braccio usa la rete. Tutti i numeri
+     ricontrollati contro questo registro: esatti.
+
+  ERRORI DELLA TESI TROVATI, INDIPENDENTI DALLA RETE:
+  1. 6.2 "riduzione fra 10,8% e 14,0% su otto livelli": erano SETTE livelli, il
+     pop150 (3,8% con v1) era omesso dall'intervallo.
+  2. 4.3 e 6.4 "il dimezzamento costa circa otto volte": stima teorica, smentita.
+     Misura diretta 2,4-4,6x. E la ricerca del robot e' l'1,7% del tempo di
+     pianificazione contro il 98,3% della folla, quindi sul TOTALE incide x1,12.
+     Il vincolo vero e' la LATENZA: 58 -> 244 ms contro un frame da 17 ms.
+     Corretto in entrambi i capitoli.
+  3. "venti milioni di controlli di visibilita'": sono ~21 milioni.
+  4. 9.1 "ha mostrato quale risoluzione paghi il proprio costo": il fattoriale non
+     e' mai stato completato. Corretto in "ne ha quantificato il costo".
+  5. Tabella 2, Kalman mediano 0,92 m: sono 0,93 (27,78 px / 30).
+
+  DA FARE, SE SI VUOLE:
+  [ ] campagna a griglia dimezzata (fattore 2): renderebbe il 6.4 una MISURA e non
+      una congettura. Con la v2 servono DUE dimezzamenti (1 m -> 25 cm), non tre.
+      Sondare prima con 4 corse: la stima "x1,12 sul totale" va verificata, perche'
+      l'1,7% e' stato misurato con 78 ripianificazioni per corsa e in scena densa
+      il robot ne fa molte di piu'.
+  [ ] scene dense su semi disgiunti, per decidere il punto F.
+
+================================================================================
+E17 - COSTO DELLA RISOLUZIONE: SECONDO DIMEZZAMENTO MISURATO   (22 agosto 2026)
+================================================================================
+Motivo: il commento 1 del relatore chiede di argomentare che il raffinamento a
+sotto-griglia costa troppo. Finora avevamo UN solo dimezzamento misurato
+(30px -> 15px) e la spinta oltre era congettura. Misurato anche 15px -> 7,5px.
+
+Banco: analisi/profila_astar_mappe.py, esteso a FATTORI_GRIGLIA = [1, 2, 4].
+Una ricerca angolo->angolo, NESSUNA persona, NESSUNA mappa di costo, 3 ripetizioni.
+
+  mappa                cella      tempo   x vs 30px   controlli visibilita'
+  (vuota)             30,0px     116,2ms      1,0x            1.020
+  (vuota)             15,0px     260,8ms      2,2x            2.672
+  (vuota)              7,5px     503,9ms      4,3x            7.048
+  training_mappa_01   30,0px      94,5ms      1,0x            5.433
+  training_mappa_01   15,0px     401,0ms      4,2x           24.741
+  training_mappa_01    7,5px    1679,7ms     17,8x          106.056
+  porta_stretta       30,0px      59,8ms      1,0x            1.464
+  porta_stretta       15,0px     159,7ms      2,7x            3.892
+  porta_stretta        7,5px     297,7ms      5,0x            5.489
+  incrocio            30,0px      41,1ms      1,0x              728
+  incrocio            15,0px     100,3ms      2,4x            1.868
+  incrocio             7,5px     236,2ms      5,7x            4.558
+
+LETTURA
+  - da 1 m a 25 cm (due dimezzamenti) il costo va da 4,3x a 17,8x. Sulla mappa
+    ingombra - la piu' simile a Povo - una singola ricerca passa da 95 ms a 1,68 s.
+  - il costo NON e' uniforme: esplode con la complessita' dei muri, non con la
+    risoluzione in se'. Mappa vuota 4,3x, mappa ingombra 17,8x sullo stesso salto.
+  - il meccanismo e' il controllo di visibilita' del Theta*: 5.433 -> 24.741 ->
+    106.056 sulla mappa ingombra, cioe' ~4,3x per dimezzamento. QUESTO CONTEGGIO
+    E' DETERMINISTICO e non dipende dal carico della macchina: e' il dato piu'
+    solido del quadro.
+
+RIPRODUCIBILITA'
+  - i RAPPORTI riproducono: primo dimezzamento 1,9-4,4x oggi contro 2,4-4,6x ad
+    agosto. Stessa banda.
+  - gli ASSOLUTI no. La coppia "58 -> 244 ms" finita nel 4.3 e nel 6.4 della tesi
+    consegnata non si riproduce come coppia appaiata: oggi la stessa mappa vuota
+    da' 116 -> 261 ms, la ingombra 95 -> 401 ms. I due valori 58 e 244 cadono
+    dentro l'inviluppo misurato (58 ~ porta_stretta a 30px, 244 ~ vuota a 15px)
+    ma NON provengono dalla stessa mappa.
+    -> in discussione vanno presentati come ORDINI DI GRANDEZZA, non come coppia:
+       "decine di ms a griglia ambiente, centinaia a griglia dimezzata, secondi a
+       griglia quarta" e' difendibile; "58 -> 244" no.
+
+LIMITI DELLA MISURA (da dichiarare se chiesto)
+  - scena vuota e senza mappa di costo: la ripianificazione vera campiona anche la
+    regione di rischio, che a griglia fine costa a sua volta. E' un LIMITE INFERIORE.
+  - un solo percorso (angolo->angolo), una sola macchina, 3-5 ripetizioni.
+  - il costo TOTALE della simulazione resta dominato dalla folla (98,3%), non dalla
+    griglia del robot (1,7%): il raffinamento incide x1,06 sul monte-ore. Il vincolo
+    e' la LATENZA del singolo ricalcolo, che gira nel thread principale contro un
+    fotogramma da 16,7 ms - e che a 30px vale gia' 41-95 ms, quindi e' fuori budget
+    ANCHE senza raffinamento.
+
+CORREZIONE ARITMETICA a E16 punto 2 (22 agosto 2026)
+  Il "x1,12 sul totale" scritto in E16 discendeva dalla vecchia stima TEORICA x8,
+  non dalla misura: 0,983 + 0,017*8 = 1,12. Con il moltiplicatore MISURATO il conto
+  corretto e':
+    un dimezzamento  (x4,2):  0,983 + 0,017*4,2  = x1,06  (+6% sul monte-ore)
+    due dimezzamenti (x17,8): 0,983 + 0,017*17,8 = x1,29  (+29%)
+  Se il "x1,12" e' finito nel testo consegnato va corretto in "x1,06", altrimenti il
+  capitolo cita 2,4-4,6x e poi ne usa 8 senza dirlo.
+  RESTA il limite gia' annotato: l'1,7% viene da 78 ripianificazioni per corsa; in
+  scena densa il robot ripianifica molto piu' spesso (main.py:2054-2055 azzera il
+  percorso a ogni variazione di celle_rilevate), quindi +6% e' un LIMITE INFERIORE.
+
+================================================================================
+E18 - COSTO DELLA SOTTO-GRIGLIA DEL RISCHIO (macchia)          (22 agosto 2026)
+================================================================================
+ATTENZIONE: fino a E17 avevamo misurato la manopola SBAGLIATA rispetto al primo
+commento del relatore. Ci sono DUE risoluzioni indipendenti:
+  A) fattore_robot          -> griglia di RICERCA del robot (main.py:390, 1223)
+                               globale sulla mappa; nei test = 1 (testing.py:71)
+  B) sottocelle_per_lato    -> sotto-griglia della DISTRIBUZIONE DI PROBABILITA'
+                               (main.py:760, 2108); locale per persona; default 1
+Il relatore parla di (B): "raffinamento della griglia per le distribuzioni di
+probabilita'". E17 misurava (A).
+
+MISURA DI (B): macchia_diffusione, una persona, mediana su 12 posizioni libere
+x 8 ripetizioni, tre mappe.
+
+  mappa               lato      tempo   x vs 1m   sottocelle toccate
+  (vuota)            30,0px   0,225ms      1,0x          37
+  (vuota)            15,0px   0,959ms      4,3x         143
+  (vuota)             7,5px   4,325ms     19,2x         571
+  (vuota)             3,8px  19,431ms     86,3x       2.289
+  training_mappa_01  30,0px   0,155ms      1,0x          23
+  training_mappa_01  15,0px   0,637ms      4,1x          92
+  training_mappa_01   7,5px   2,876ms     18,6x         365
+  training_mappa_01   3,8px  12,973ms     83,9x       1.454
+  incrocio           30,0px   0,206ms      1,0x          30
+  incrocio           15,0px   0,866ms      4,2x         114
+  incrocio            7,5px   3,926ms     19,0x         452
+  incrocio            3,8px  17,496ms     84,7x       1.813
+
+  Scala x4,2 per dimezzamento, IDENTICA su tutte e tre le mappe (4,1-4,3 /
+  18,6-19,2 / 83,9-86,3): e' la crescita in area della regione diffusa, non un
+  effetto della planimetria. Qui i muri NON aiutano, a differenza del Theta*.
+
+COSTO PER AGGIORNAMENTO (budget 100 ms = 6 fotogrammi), mappa ingombra.
+La macchia si ricalcola PER OGNI PERSONA TRACCIATA e gira nel LOOP PRINCIPALE:
+  lato   30,0px:   9 persone   1,4 ms (1,4%)    30 persone    4,6 ms (4,6%)
+  lato   15,0px:   9 persone   5,7 ms (5,7%)    30 persone   19,1 ms (19,1%)
+  lato    7,5px:   9 persone  25,9 ms (26%)     30 persone   86,3 ms (86%)
+  lato    3,8px:   9 persone 116,8 ms (117%)    30 persone  389,2 ms (389%)
+
+  -> a 25 cm con folla densa si e' gia' all'86% del budget; a 12,5 cm si sfora
+     di quattro volte. Il costo scala come N_persone x (1/lato)^2: e' l'unica
+     grandezza del sistema che moltiplica popolazione E risoluzione insieme.
+
+IL PUNTO DECISIVO (main.py:2109-2112)
+  La macchia fine NON arriva al pianificatore: le sottocelle vengono aggregate
+  nella cella della GRIGLIA DEL ROBOT che le contiene, prendendo il peso massimo
+  (rapporto_collasso = sottocelle_per_lato // fattore_robot). Quindi la
+  risoluzione della distribuzione viene BUTTATA VIA al momento della decisione.
+  Per usarla "per la parte decisionale" - la richiesta del relatore - servono
+  ENTRAMBI i raffinamenti insieme, e i due costi si sommano:
+     macchia a 25 cm, 30 persone   ->   86 ms su un budget di 100 ms
+     ricerca a 25 cm               -> 1680 ms su un fotogramma da 16,7 ms
+  E' questa la risposta quantitativa al primo commento.
+
+================================================================================
+E19 - COSTO DI PARETE DI UNA CORSA A GRIGLIA FINE              (22 agosto 2026)
+================================================================================
+VERDETTO: NULLO. Dimezzare la griglia di ricerca del robot non allunga le corse in
+modo misurabile. Media +1,0%, rapporto media/SE = 0,78 -> indistinguibile da zero
+secondo il criterio della tesi.
+
+Banco: testing.esegui_corsa, condizione 'base' (nessuna AI, isola la sola
+risoluzione), mappa training_mappa_01, 8 corse su 8 worker, semi comuni fra i bracci.
+
+  livello  seme   1 m (30px)   50 cm (15px)   rapporto   frame f1 / f2
+      150     1      212,2 s        211,9 s      1,000     1762 / 1796
+      150     2      202,0 s        219,7 s      1,088     1827 / 1793
+      450     1      757,9 s        770,7 s      1,017     2167 / 2144
+      450     2      879,7 s        869,3 s      0,988     2365 / 2406
+
+  differenze (s): -0,3  +17,7  +12,8  -10,4
+  media +4,95 s su una base media di 512,9 s = +1,0%;  SE 6,37;  rapporto 0,78
+  normalizzato per fotogramma: 0,98 / 1,11 / 1,03 / 0,97  -> stessa conclusione
+
+LETTURE
+  - il livello denso NON fa emergere il costo: 450 da' +1,7% e -1,2%, cioe' rumore.
+    L'ipotesi "in scena densa il robot ripianifica di continuo e la griglia fine si
+    fa sentire" NON e' confermata.
+  - la densita' costa x3,6 (202-212 s a 150 contro 758-880 s a 450) a parita' di
+    risoluzione. E' la folla il costo, non la griglia. Il timeout a 10 minuti del
+    primo tentativo era dovuto al livello 450, non al fattore 2.
+  - i conteggi di fotogrammi DIFFERISCONO fra i bracci (1762 vs 1796, 2167 vs 2144):
+    la griglia fine cambia davvero la traiettoria, quindi il confronto non e'
+    degenere. Cambia il comportamento senza cambiare il costo.
+  - risalendo il modello  rapporto = 1 + f*(m-1)  con m=4,2 misurato: f <= ~2%,
+    coerente con l'1,7% del profilo. Estrapolando, 25 cm costerebbe al piu' +34%
+    e 12,5 cm al piu' x2,5 di tempo di parete.
+
+CONSEGUENZA PER LA TESI
+  Il motivo per non raffinare NON e' mai stato il costo delle campagne: quelle si
+  potevano fare. E' la latenza a bordo (E17: 1,68 s per ricalcolo a 25 cm contro un
+  fotogramma da 16,7 ms) e il costo della macchia (E18: 86 ms su 100 a 25 cm con 30
+  persone). Se in discussione si dicesse "costava troppo far girare i test", questo
+  numero smentirebbe.
+
+LIMITI: 4 coppie, una mappa, due livelli, sola condizione 'base', solo fattore 2.
+
+================================================================================
+E20 - PERCHE' IL SIMULATORE INTERATTIVO LAGGA E I TEST NO      (22 agosto 2026)
+================================================================================
+Osservazione dell'autore: avviando main.py con la griglia fine e spostando la meta
+lontano, il simulatore diventa inusabile. E19 misura +1% sulle campagne. Non e' una
+contraddizione: i due percorsi di codice ripianificano con POLITICHE DIVERSE.
+
+  main.py:2054-2055     if celle_rilevate != celle_rilevate_precedenti: percorso = []
+                        -> il percorso viene buttato a OGNI variazione dell'insieme
+                           delle celle occupate rilevate. In scena affollata cambia
+                           quasi a ogni fotogramma: fino a 60 ricerche al secondo.
+
+  testing.py:333        if not robot["percorso"] or contatore_frame % intervallo_ricalcolo == 0
+                        -> NESSUNA invalidazione su celle_rilevate. Si ripianifica a
+                           INTERVALLO FISSO. Con ACCELERAZIONE=5 l'intervallo e'
+                           60//5 = 12 passi simulati = 1 secondo simulato.
+                           Circa 180 ricerche per corsa da 2167 passi.
+
+VERIFICA ARITMETICA (livello 450, fattore 1)
+  180 ricerche x ~60 ms = ~10,8 s su 758 s di corsa = 1,4%
+  che e' ESATTAMENTE la fetta f dedotta in E19 dal rapporto misurato, e coincide
+  con l'1,7% del profilo. Tre strade indipendenti, stesso numero.
+
+IL COSTO E' UN PRODOTTO
+      lag = (costo per ricerca) x (ricerche al secondo)
+  la griglia fine moltiplica il PRIMO fattore per ~4,2
+  la politica di main.py moltiplica il SECONDO fattore per ~60
+  Nei test il secondo fattore vale 1 -> il primo non si vede. Nell'interattivo il
+  secondo esplode -> il primo diventa devastante: ~4 ricerche/s a 260 ms l'una
+  significa che il simulatore non riesce a produrre nemmeno un fotogramma su quindici.
+
+"MI SPOSTO TROPPO": meta lontana = percorso lungo = piu' nodi espansi e scorciatoie
+Theta* che si allungano fino a coprire la diagonale (~400 campioni per controllo di
+visibilita'). E' il caso peggiore misurato in E17: angolo->angolo a 15px = 261 ms.
+
+CONSEGUENZA - DA NON SBAGLIARE IN DISCUSSIONE
+  Il "+1%" di E19 vale per la politica a intervallo fisso del banco di test, ed e'
+  onesto per le campagne. NON va citato come "la griglia fine e' gratis": sotto la
+  politica di main.py non lo e' affatto. Se qualcuno avvia il simulatore lo vede.
+
+RIMEDIO NOTO (non implementato): invalidare il percorso solo quando le celle
+cambiate INTERSECANO davvero il percorso corrente, invece che a ogni variazione.

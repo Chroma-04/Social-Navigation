@@ -1,0 +1,86 @@
+PRESENTAZIONE DELLA DISCUSSIONE
+===============================
+
+Contenuto della cartella
+------------------------
+Discussione_Sabadas.pptx    la presentazione, 15 slide esposte + 6 di riserva
+genera_presentazione.py     lo script che la costruisce
+figure/                     le immagini usate, copiate qui perche' la cartella
+                            sia autosufficiente
+
+Per rigenerare il pptx da zero:      py presentazione/genera_presentazione.py
+Attenzione: la rigenerazione SOVRASCRIVE il file. Se hai gia' rifinito le slide
+a mano, salva prima una copia con un altro nome.
+
+
+Struttura, dodici minuti
+------------------------
+  1  Il problema e la domanda        slide 1-3      1:45
+  2  Il sistema                      slide 4-7      3:00
+  3  L'ibridazione e la misura       slide 8-10     2:30
+  4  Il risultato                    slide 11-14    3:00
+  5  Conclusioni                     slide 15       1:30
+
+Ogni slide ha nelle NOTE il tempo assegnato e cosa dire. In PowerPoint le vedi
+con Visualizza -> Pagina note, oppure in presentazione con la Visualizzazione
+Relatore (tasto destro sulla slide -> Mostra visualizzazione relatore).
+
+Il blocco 4 e' il contributo del lavoro: se e' in ritardo, si taglia dal blocco
+2, mai da lui.
+
+
+Due cose da completare a mano
+-----------------------------
+SLIDE 1 - il video
+  Nella colonna destra c'e' un riquadro segnaposto grigio. Cancellalo e metti al
+  suo posto la registrazione della simulazione su Povo (tasto V nel simulatore).
+
+  Inserisci -> Video -> Questo dispositivo, poi tasto destro sul video ->
+  Formato video -> Dimensioni e proprieta':
+
+      larghezza 11,3 cm        altezza 19,05 cm
+      posizione orizzontale 22,57 cm      verticale 0 cm
+
+  Scheda Riproduzione: Avvio "Automaticamente", "Ripeti fino all'interruzione".
+  Scheda Presentazione: togli la spunta a "Mostra controlli multimediali".
+
+  Registra con tutta la mappa di Povo visibile nella finestra: il video esce gia'
+  della proporzione giusta per la colonna (44x73 celle = 0,60; la colonna = 0,59).
+  Chiudi il pannello TAB prima di premere V, altrimenti finisce nella clip.
+
+SLIDE 4 - il confronto A* / Theta*  (facoltativo ma consigliato)
+  In figure/ c'e' confronto_astar_theta.png: gli stessi due algoritmi eseguiti
+  davvero sulla stessa griglia, uno accanto all'altro. Inseriscilo sotto l'elenco.
+
+      larghezza 29,87 cm       (l'altezza segue da sola: 10,89 cm)
+      posizione orizzontale 2 cm        verticale 8,0 cm
+
+  Si rigenera con:  py presentazione/figure/genera_figura_theta.py
+
+
+SLIDE 5 - la macchia di rischio
+  C'e' un riquadro segnaposto al posto della schermata. Serve un'immagine della
+  regione di rischio con persona in movimento: e' la Figura 2b della tesi, oppure
+  la si rifa' dal simulatore.
+
+
+Slide di riserva (17-21)
+------------------------
+Non si espongono. Stanno dopo la conclusione e servono se durante le domande
+esce uno di questi temi:
+
+  17  perche' non si e' raffinata la griglia (latenza, 95 -> 401 ms -> 1,68 s)
+  18  scala spaziale del simulatore (una cella = un metro)
+  19  perche' il guadagno della rete si ferma al 20,2% (manca il contesto)
+  20  come si affronterebbe su un robot reale (finestra locale, due livelli)
+  21  i tempi assoluti dipendono dall'implementazione (i rapporti no)
+
+
+Prima della discussione
+-----------------------
+- provala a voce col cronometro: la prima volta uscira' sui 15 minuti, ed e'
+  normale. Il taglio va deciso prima, non improvvisato;
+- aprila sul PC della discussione, o almeno su un altro computer: e' il punto
+  in cui le presentazioni si rompono, quasi sempre per il video;
+- verifica che il video sia incorporato e non collegato (lo e', se lo hai
+  inserito da "Questo dispositivo").

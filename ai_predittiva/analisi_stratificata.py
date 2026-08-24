@@ -19,7 +19,7 @@ import os
 import sys
 import numpy as np
 import torch
-from allena_previsione import (CorrezioneKalman, prepara_input, carica_dataset, FILE_MODELLO,
+from allena_previsione import (CorrezioneKalman, modello_da_file, prepara_input, carica_dataset, FILE_MODELLO,
                                FILE_MODELLO_SPECIALIZZATO, CARTELLA_DATASET,
                                DIMENSIONE_NASCOSTA, DIMENSIONE_NASCOSTA_SPECIALIZZATO)
 
@@ -61,10 +61,7 @@ def carica_e_correggi(path_dataset, specializzato=False):
     tipi_mappa = np.array([_tipo_mappa(m) for m in mappe])
 
     path_modello = FILE_MODELLO_SPECIALIZZATO if specializzato else FILE_MODELLO
-    dimensione = DIMENSIONE_NASCOSTA_SPECIALIZZATO if specializzato else DIMENSIONE_NASCOSTA
-    modello = CorrezioneKalman(dimensione_nascosta=dimensione)
-    modello.load_state_dict(torch.load(path_modello, map_location="cpu"))
-    modello.eval()
+    modello = modello_da_file(path_modello)
     with torch.no_grad():
         correzione = modello(torch.from_numpy(prepara_input(storico))).numpy()
     pred_ai = pred_kalman + correzione

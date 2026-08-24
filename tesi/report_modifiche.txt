@@ -512,3 +512,90 @@ E' il terzo effetto borderline della tesi caduto in replica, e va usato come tal
 il tetto misurato dall'oracolo (+0,239 m a rapporto 1,92, gia' sotto soglia) rendeva l'esito
 prevedibile prima della misura.
 Registrato in tesi/capitolo_velocita_dati.txt come E11, con aggiornamento del quadro complessivo.
+
+================================================================================
+RISPOSTA AI TRE COMMENTI DEL RELATORE                          (22 agosto 2026)
+================================================================================
+Consegnati i testi corretti per le cinque sezioni toccate. Solo dati e frasi
+aggiunte dove richiesto: nessuna sezione spostata, aggiunta o rinominata.
+
+COMMENTO 1 (raffinamento a sotto-griglia)
+  4.3  capoverso "La via apparentemente ovvia" riscritto:
+       - "cresce con l'inverso del passo" -> quadrato dell'inverso (misurato)
+       - "raddoppiarsi dei campioni" -> ERRATO: PASSO_CAMPIONAMENTO_VISIBILITA
+         e' DIM_NODO/4, costante. Previsione corretta x4, non x8, e i 2,4-4,6
+         misurati ora la CONFERMANO invece di smentirla
+       - "x1,12" -> misura diretta +1% (E19)
+       - "58 -> 244 ms" -> 95 -> 401 ms su planimetria ingombra (coppia vera)
+       - rimossa "incompatibile con campagne di validazione" (smentita da E19)
+       - aggiunto costo macchia 86 ms su 100 con 30 persone (E18)
+  6.4  stesse correzioni + distinzione fra politica di ripianificazione del
+       banco (intervallo fisso, testing.py:333) e del simulatore (a ogni
+       variazione di celle_rilevate, main.py:2054) -> rende coerenti il +1% e
+       la latenza continua
+COMMENTO 2 (transizione cinematica come robustezza)
+  3.2.3 ultimo capoverso: la cautela diventa verifica supplementare, in forma
+        CONDIZIONALE per non anticipare i risultati nel capitolo di metodo.
+        Esteso il riferimento anche al capitolo 8 (il relatore cita 7 e 8).
+  9.2   capoverso nuovo prima della conclusione: l'esito si ripresenta sotto
+        entrambi i modelli, quindi non e' artefatto della dinamica. Usato "un
+        secondo e mezzo di transitorio", coerente con la derivazione del 3.2.3.
+COMMENTO 3 (latenza inferenza GRU)
+  6.1  paragrafo "Costo computazionale": da "non quantificata" a quantificata
+       (2-5 ms), con la clausola di onesta' spostata su cio' che resta davvero
+       non misurato (energia e memoria). Chiusa anche l'ipotesi, lasciata aperta
+       due righe sopra, che la rete riduca la frequenza di pianificazione.
+  6.4  numeri completi: 2-5 ms CPU, 0,36 ms GPU, piatti nel numero di persone.
+
+DA CONTROLLARE NEL DOCUMENTO CONSEGNATO
+  [ ] esiste un prospetto tabellare delle variabili in gioco? se si', riga
+      "costo computazionale & 2-5 ms per aggiornamento & trascurabile"
+  [ ] 6.1 apre con "Formulare la questione ... e' TUTTAVIA mal posto": il
+      "tuttavia" non ha antecedente, forse manca il capoverso introduttivo
+  [ ] "58 -> 244" e "x1,12" possono comparire anche altrove
+  [ ] 9.1 "ha mostrato quale risoluzione paghi il proprio costo": ERA imprecisa
+      perche' il fattoriale non era stato fatto. Con E17/E18/E19 ora e' VERA.
+
+Misure a sostegno: registro capitolo_velocita_dati.txt, voci E17-E20.
+
+CONTROLLO SU "TESI 1.4.pdf"                                    (22 agosto 2026)
+  Le correzioni al 4.3, 6.1, 6.4, 3.2.3 e 9.2 risultano applicate. Restano tre
+  punti che le correzioni stesse hanno reso incoerenti col resto:
+  [ ] p.16, apertura del Cap.4: "cresce approssimativamente con il CUBO
+      dell'inverso del passo ... quadruplica i nodi e RADDOPPIA I CAMPIONI".
+      Contraddice il 4.3 una pagina dopo, che ora dice quadrato e passo fisso.
+  [ ] p.31, Tabella 4, riga finale: "costo computazionale | non quantificato".
+      Contraddice il 6.1 e il 6.4, che ora lo quantificano. E' anche la riga
+      che il relatore andrebbe a cercare per il suo terzo commento.
+  [ ] p.7, 2.2: "una griglia piu' fine moltiplica sia il numero di nodi sia il
+      numero di campioni per ciascun controllo". Terza occorrenza dello stesso
+      errore, la piu' lontana e la meno visibile.
+  Non corretti per scelta dell'autore: asterisco perso in "Theta produce" (p.34).
+
+CONTROLLO SU "TESI 1.5.pdf" - VERSIONE FINALE                  (22 agosto 2026)
+  Le tre correzioni residue risultano applicate:
+    2.2 (p.6)   "moltiplica il numero di nodi ... il costo del singolo controllo
+                 resta invariato, poiche' il campionamento procede a passo fisso"  OK
+    Cap.4 (p.15) "con il quadrato dell'inverso del passo ... e con essi il numero
+                 di controlli di visibilita'"                                       OK
+    Tab.4 (p.31) "costo computazionale | 2-5 ms per aggiornamento | misurato"       OK
+  Nessuna occorrenza residua di "cubo", "raddoppia i campioni", "otto volte",
+  "x1,12", "58 a 244". Coerenza numerica verificata fra 4.3 e 6.4 (95->401 ms,
+  1,68 s, 86 ms su 100, 2,4-4,6x, 1,7%/98,3%, 1%), fra 6.1 e 6.4 (inferenza
+  2-5 ms), fra 3.2.3 e 9.2 ("un secondo e mezzo di transitorio"), fra Tab.2 e
+  Tab.4 (20,7% origine / 20,2% Povo, riconciliati esplicitamente in 6.2).
+  9.1 "ne ha quantificato il costo per ciascuna risoluzione" ora e' VERO (E17-E19).
+
+  RESIDUI MINORI, nessuno bloccante:
+  [ ] 7.1 p.39: "quanto osservato nel capitolo 3.2.3" -> e' una sezione, non un
+      capitolo. Refuso di registro, preesistente.
+  [ ] p.34: "Theta produce" - asterisco perso, lasciato per scelta dell'autore.
+  [ ] 4.1 apre con "Il robot cerca il percorso su una griglia di lato dimezzato",
+      al presente, mentre 4.3 e 6.2 dichiarano che le campagne girano a lato
+      pieno. Il 4.3 lo risolve esplicitamente; una subordinata in 4.1 lo
+      chiuderebbe del tutto. Facoltativo.
+
+  ARGOMENTO DISPONIBILE E NON USATO (per la discussione, non per il testo):
+      gia' a 1 m la ripianificazione costa 41-116 ms contro un fotogramma da
+      16,7 ms. Il ricalcolo e' fuori budget ANCHE senza raffinamento: il
+      raffinamento non apre il problema, ne aggrava uno esistente.

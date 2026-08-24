@@ -28,7 +28,8 @@ Scala fisica: una cella vale un metro reale (vedi METRI_PER_CELLA poco sotto). I
 restano tutti in pixel, la scala serve solo a etichettare il pannello.
 
 Comandi principali: TAB pannello tecnico, W disegna muri, P mappa Povo, F5/F9 salva e
-carica, T salva mappa di training, F11 schermo intero, rotella zoom, tasto destro pan.
+carica, T salva mappa di training, V registra un video, F11 schermo intero, rotella zoom,
+tasto destro pan.
 """
 import os
 os.environ["SDL_VIDEO_CENTERED"] = "1"
@@ -39,6 +40,9 @@ import random
 import heapq
 import collections
 import multiprocessing as mp
+import subprocess
+import time
+import datetime
 
 # --- CONFIGURAZIONE ---
 X_TOT_STANDARD, Y_TOT_STANDARD = 80, 60
@@ -731,6 +735,14 @@ def previsione_posizione_kalman(traccia, frame_futuri):
 # Il valore predefinito lascia il comportamento identico a prima.
 previsione_per_controllo = previsione_posizione_kalman
 
+# Punto di innesto del CONTROLLO DI POSIZIONE, gemello del precedente e indipendente da esso.
+# offset_evitamento_predittivo chiama questa variabile per proiettare le persone sui tre istanti
+# su cui costruisce le campane di rischio. Tenerla separata da previsione_per_controllo serve a
+# poter ibridare un canale alla volta: i due controlli agiscono su assi diversi (uno sceglie uno
+# scalare di velocita', l'altro una direzione) e vanno misurati uno alla volta, altrimenti un
+# guadagno non e' attribuibile. Usata da ai_posizione/oracolo_posizione.py.
+previsione_per_evitamento = previsione_posizione_kalman
+
 # ============================================================================================
 # REGIONE DI RISCHIO (macchia di probabilita')
 # La previsione e' un punto, ma trattarla come tale le attribuirebbe una certezza che non ha:
@@ -969,7 +981,7 @@ def offset_evitamento_predittivo(x, y, percorso, tracciamento_lidar, griglia, pa
     # le previsioni si calcolano una volta sola per persona e per istante: rifarle dentro il
     # ciclo dei candidati costerebbe un fattore pari al numero di candidati
     istanti = (0.0, PREVISIONE_EVITAMENTO_FRAME * 0.5, float(PREVISIONE_EVITAMENTO_FRAME))
-    previsioni = [previsione_posizione_kalman(traccia, istante)
+    previsioni = [previsione_per_evitamento(traccia, istante)
                   for traccia in persone for istante in istanti]
 
     nodo = percorso[0]
@@ -1128,6 +1140,136 @@ def _crea_pool_persone(griglia):
     n_worker = min(8, os.cpu_count() or 4)
     return mp.Pool(n_worker, initializer=_pool_inizializza_worker, initargs=(_celle_muro_di(griglia), X_TOT, Y_TOT))
 
+# --- REGISTRAZIONE VIDEO (tasto V) ---
+# Serve a ricavare dalla simulazione le clip da mostrare in sede di discussione: si preme V
+# per avviare, V di nuovo per fermare, e il filmato compare gia' pronto nella cartella.
+CARTELLA_REGISTRAZIONI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tesi", "foto e video")
+FPS_REGISTRAZIONE = 30
+
+
+class RegistratoreVideo:
+    """Registra la finestra in un mp4 comandato dal tasto V.
+
+    I fotogrammi vengono spinti grezzi nello stdin di ffmpeg, che li codifica in H.264 mentre
+    la simulazione prosegue: non si passa da immagini intermedie e il video e' completo appena
+    si preme V la seconda volta.
+
+    L'inquadratura e' la sola mappa, non l'intera finestra: si fissa alla pressione di V e non
+    si muove piu', cosi' la clip ha un bordo stabile anche se poi si sposta la vista. Quel che
+    cade fuori dalla mappa - lo sfondo, e il contatore in basso a destra se la mappa non arriva
+    fino li' - resta fuori dal filmato.
+
+    Il ritmo di uscita e' fisso, quello della simulazione no: se un fotogramma dura piu' del
+    dovuto viene scritto piu' volte, cosi' il filmato scorre alla velocita' reale invece che
+    accelerato. E' la ragione per cui la classe tiene un credito in fotogrammi maturati.
+    """
+
+    DUPLICAZIONE_MASSIMA = 5  # tetto ai fotogrammi ripetuti: un rallentamento lungo non gonfia il file
+
+    def __init__(self):
+        self.processo = None
+        self.dimensione = None   # misura dichiarata a ffmpeg all'avvio: non puo' cambiare in corsa
+        self.area = None         # porzione di finestra da riprendere, fissata all'avvio
+        self.percorso = None
+        self.credito = 0.0       # fotogrammi di uscita maturati e non ancora scritti
+        self.ultimo_istante = None
+
+    @property
+    def attivo(self):
+        return self.processo is not None
+
+    def alterna(self, superficie, area=None):
+        """Il tasto V. Torna la coppia (messaggio, colore) da mostrare a schermo."""
+        return self.ferma() if self.attivo else self.avvia(superficie, area)
+
+    def avvia(self, superficie, area=None):
+        self.area = (area if area is not None else superficie.get_rect()).clip(superficie.get_rect())
+        if self.area.width < 16 or self.area.height < 16:
+            return "Mappa fuori vista: non c'e' nulla da registrare", ROSSO
+        try:
+            import imageio_ffmpeg
+            eseguibile = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return "Registrazione non disponibile: manca imageio-ffmpeg", ROSSO
+
+        os.makedirs(CARTELLA_REGISTRAZIONI, exist_ok=True)
+        self.percorso = os.path.join(CARTELLA_REGISTRAZIONI,
+                                     datetime.datetime.now().strftime("simulazione_%Y%m%d_%H%M%S.mp4"))
+        self.dimensione = self.area.size
+        comando = [
+            eseguibile, "-y",
+            "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", "%dx%d" % self.dimensione,
+            "-r", str(FPS_REGISTRAZIONE),
+            "-i", "-",
+            "-an",
+            "-vcodec", "libx264", "-preset", "veryfast", "-crf", "20",
+            # H.264 in yuv420p pretende lati pari, e la finestra e' ridimensionabile a piacere
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-pix_fmt", "yuv420p",
+            self.percorso,
+        ]
+        try:
+            self.processo = subprocess.Popen(
+                comando, stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as errore:
+            self.processo = None
+            return "Registrazione non avviata: %s" % errore, ROSSO
+
+        self.credito = 0.0
+        self.ultimo_istante = time.perf_counter()
+        return "Registrazione avviata (solo mappa) - V per fermare", ROSSO
+
+    def cattura(self, superficie):
+        """Da chiamare a disegno finito e prima della spia REC, che nel video non deve comparire."""
+        if not self.attivo:
+            return
+        adesso = time.perf_counter()
+        self.credito += (adesso - self.ultimo_istante) * FPS_REGISTRAZIONE
+        self.ultimo_istante = adesso
+        da_scrivere = min(int(self.credito), self.DUPLICAZIONE_MASSIMA)
+        if da_scrivere <= 0:
+            return
+        self.credito -= da_scrivere
+
+        area = self.area.clip(superficie.get_rect())
+        if area.size != superficie.get_size() and area.width > 0 and area.height > 0:
+            superficie = superficie.subsurface(area)
+        if superficie.get_size() != self.dimensione:
+            # finestra rimpicciolita a registrazione in corso: ffmpeg attende fotogrammi
+            # della misura dichiarata all'avvio, quindi si riporta ognuno a quella
+            superficie = pygame.transform.smoothscale(superficie, self.dimensione)
+        dati = pygame.image.tobytes(superficie, "RGB")
+        try:
+            for _ in range(da_scrivere):
+                self.processo.stdin.write(dati)
+        except (BrokenPipeError, OSError):
+            self.ferma()
+
+    def ferma(self):
+        if not self.attivo:
+            return None
+        processo, percorso = self.processo, self.percorso
+        self.processo = None
+        try:
+            processo.stdin.close()
+            processo.wait(timeout=30)
+        except Exception:
+            processo.kill()
+        return "Video salvato: %s" % os.path.basename(percorso), VERDE
+
+    def disegna_spia(self, superficie, font):
+        """Pallino lampeggiante in alto a destra: visibile a schermo, assente dal filmato."""
+        if not self.attivo or (pygame.time.get_ticks() // 500) % 2 == 0:
+            return
+        x = superficie.get_width() - 20
+        pygame.draw.circle(superficie, ROSSO, (x, 20), 8)
+        etichetta = font.render("REC", True, ROSSO)
+        superficie.blit(etichetta, etichetta.get_rect(midright=(x - 16, 20)))
+
+
 def main():
     """Ciclo interattivo: editor dell'ambiente e simulazione, nella stessa finestra.
 
@@ -1155,7 +1297,7 @@ def main():
     # l'AI, e caricare torch/CUDA in ognuno allungava l'avvio di decine di secondi
     import numpy as np
     import torch
-    from ai_predittiva.allena_previsione import CorrezioneKalman, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO
+    from ai_predittiva.allena_previsione import CorrezioneKalman, modello_da_file, prepara_input, FINESTRA_STORICO_FRAME, FILE_MODELLO
     torch.set_num_threads(1)  # batch minuscoli: sincronizzare i thread costa piu' del calcolo
 
     pygame.init()
@@ -1171,7 +1313,6 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 32)
     font_piccolo = pygame.font.SysFont(None, 24)
-    font_grande = pygame.font.SysFont(None, 48)
 
     chiedendo_password = False
     input_password = ""
@@ -1184,6 +1325,9 @@ def main():
     primo_punto_rettangolo = None
     messaggio_mappa_training_timer = 0
     messaggio_mappa_training_testo = ""
+    registratore = RegistratoreVideo()  # V: avvia e ferma la registrazione della finestra
+    messaggio_video_timer = 0
+    messaggio_video = ("", VERDE)
     frame_inizio_target = None  # frame in cui e' stato assegnato il target attuale (click): serve a calcolare il tempo di percorrenza all'arrivo
     messaggio_arrivo_timer = 0
     messaggio_arrivo_testo = ""
@@ -1217,11 +1361,8 @@ def main():
 
     # correzione AI sopra al Kalman: allenata offline, qui solo inferenza. Se il file non esiste, il
     # toggle in pannello resta senza effetto e il sistema usa il solo Kalman
-    modello_correzione_ai = CorrezioneKalman()
     modello_ai_disponibile = os.path.exists(FILE_MODELLO)
-    if modello_ai_disponibile:
-        modello_correzione_ai.load_state_dict(torch.load(FILE_MODELLO, map_location="cpu"))
-        modello_correzione_ai.eval()
+    modello_correzione_ai = modello_da_file(FILE_MODELLO) if modello_ai_disponibile else CorrezioneKalman()
 
     # pool per il ricalcolo parallelo dei percorsi; i due flag tengono traccia di quando i muri cambiano,
     # perche' in quel caso la copia della griglia nei worker va rigenerata
@@ -1867,6 +2008,14 @@ def main():
                     messaggio_mappa_training_testo = f"Mappa training salvata: {os.path.basename(path_salvata)}"
                     messaggio_mappa_training_timer = 90
 
+                if event.key == pygame.K_v:
+                    area_mappa = pygame.Rect(int(offset_x), int(offset_y),
+                                             int(LARGHEZZA * zoom), int(ALTEZZA * zoom))
+                    esito = registratore.alterna(screen, area_mappa)
+                    if esito:
+                        messaggio_video = esito
+                        messaggio_video_timer = 120
+
                 if event.key == pygame.K_TAB:
                     pannello_aperto = not pannello_aperto
 
@@ -2432,10 +2581,10 @@ def main():
             testo_mappa, colore_mappa = messaggio_mappa_testo
             screen.blit(font.render(testo_mappa, True, colore_mappa), (10, 70))
 
-        if messaggio_arrivo_timer > 0:
-            messaggio_arrivo_timer -= 1
-            arrivo_txt = font_grande.render(messaggio_arrivo_testo, True, VERDE)
-            screen.blit(arrivo_txt, arrivo_txt.get_rect(center=(screen.get_width() // 2, screen.get_height() // 2)))
+        if messaggio_video_timer > 0:
+            messaggio_video_timer -= 1
+            testo_video, colore_video = messaggio_video
+            screen.blit(font.render(testo_video, True, colore_video), (10, 100))
 
         # 5. richiesta password per il salvataggio
         if errore_timer > 0:
@@ -2668,9 +2817,23 @@ def main():
         contatore_persone_txt = font.render(f"Persone in simulazione: {totale_persone_simulazione}", True, NERO)
         screen.blit(contatore_persone_txt, contatore_persone_txt.get_rect(bottomright=(screen.get_width() - 10, screen.get_height() - 10)))
 
+        # il tempo di percorrenza si accoda al contatore, appena sopra: al centro dello schermo
+        # copriva la scena proprio nell'istante in cui la si vorrebbe guardare
+        if messaggio_arrivo_timer > 0:
+            messaggio_arrivo_timer -= 1
+            arrivo_txt = font.render(messaggio_arrivo_testo, True, VERDE)
+            screen.blit(arrivo_txt, arrivo_txt.get_rect(
+                bottomright=(screen.get_width() - 10, screen.get_height() - 10 - contatore_persone_txt.get_height())))
+
+        # il fotogramma va preso a disegno ultimato ma prima della spia REC, che serve a chi
+        # guarda lo schermo e non deve finire nella clip
+        registratore.cattura(screen)
+        registratore.disegna_spia(screen, font)
+
         pygame.display.flip()
         clock.tick(60)
 
+    registratore.ferma()
     pool_persone.terminate()
     pool_persone.join()
     pygame.quit()
