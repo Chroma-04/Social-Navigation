@@ -57,6 +57,12 @@ SLIDE 4 - il confronto A* / Theta*  (facoltativo ma consigliato)
 
   Si rigenera con:  py presentazione/figure/genera_figura_theta.py
 
+  Per i due video affiancati: nel simulatore il tasto A alterna Theta* e A*
+  classico. In alto a sinistra sulla mappa compare la targhetta con il nome
+  dell'algoritmo, quindi finisce dentro la registrazione e i due filmati si
+  distinguono da soli. Stessa mappa e stessa destinazione nelle due riprese,
+  altrimenti si confronta altro.
+
 
 SLIDE 5 - la macchia di rischio
   C'e' un riquadro segnaposto al posto della schermata. Serve un'immagine della

@@ -126,6 +126,12 @@ COSTO_CELLA_OCCUPATA = DIM_NODO * 10  # penalita' A* per cella occupata: forte m
 # finito, cosi' un varco tappato resta percorribile in ultima istanza
 COSTO_ALONE_PERSONE_FERME = COSTO_CELLA_OCCUPATA * 2
 MARGINE_ALONE_PERSONE_FERME_PX = 6.0  # px di franco oltre l'ingombro dei corpi
+# Una persona ferma vista una volta resta nella mappa del robot per questo tempo anche quando
+# esce dal campo del lidar. Senza memoria il robot pianifica dritto verso un corpo che ha appena
+# visto, se lo ritrova davanti e si blocca: e' la persistenza che una costmap locale reale tiene.
+# Vale per le sole persone ferme - ricordare un corpo in movimento significherebbe evitare un
+# ostacolo che nel frattempo se ne e' andato.
+MEMORIA_PERSONE_FERME_S = 20.0  # secondi simulati
 INTERVALLO_RICALCOLO_ROBOT_FRAME = 60    # ricalcolo percorso robot, in frame
 INTERVALLO_AGGIORNAMENTO_MACCHIA_FRAME = 6  # ricalcolo macchia di probabilita', in frame
 INTERVALLO_RICALCOLO_PERSONE_FRAME = 10  # ricalcolo percorso persone, in frame
@@ -198,7 +204,7 @@ def layout_pannello():
     cursore += 25
     return y, cursore
 FILE_CONFIGURAZIONE_PANNELLO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_pannello.json")
-VEL_MULT_MIN, VEL_MULT_MAX = 0.2, 25.0
+VEL_MULT_MIN, VEL_MULT_MAX = 0.0, 25.0  # a zero la simulazione si ferma: utile per osservare una scena
 NUMERO_PERSONE_DEFAULT = 0
 NUMERO_PERSONE_MAX = 200
 NUMERO_PERSONE_FERME_DEFAULT = 0
@@ -305,7 +311,7 @@ class Nodo:
         self.g = self.h = self.f = 0
         self.genitore = None
 
-def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None, celle_bloccate=None, mappa_costo_extra=None):
+def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=None, celle_bloccate=None, mappa_costo_extra=None, any_angle=True):
     # geometria letta dalla griglia ricevuta: la stessa funzione serve folla e robot. Il costo per cella
     # si riscala con il lato, cosi' la penalita' totale di un ostacolo non dipende dalla risoluzione
     dim = griglia[0][0].dim
@@ -366,8 +372,10 @@ def algoritmo_a_star(griglia, inizio_pos_pixel, fine_pos_griglia, rumore_seed=No
                 nuovo_genitore = attuale
 
                 # Theta*: se il nonno vede il vicino in linea libera, collegarlo direttamente a lui
-                # accorcia il percorso e lo svincola dagli 8 angoli della griglia
-                if attuale.genitore is not None and scorciatoia_libera(griglia, attuale.genitore, vicino, celle_bloccate, mappa_costo_extra):
+                # accorcia il percorso e lo svincola dagli 8 angoli della griglia. Spegnendo
+                # any_angle salta questo passo e resta l'A* classico: e' l'unica differenza
+                # fra i due algoritmi, e serve a mostrarla affiancata
+                if any_angle and attuale.genitore is not None and scorciatoia_libera(griglia, attuale.genitore, vicino, celle_bloccate, mappa_costo_extra):
                     dist_scorciatoia = math.hypot(vicino.cx - attuale.genitore.cx, vicino.cy - attuale.genitore.cy)
                     nuovo_g_scorciatoia = attuale.genitore.g + dist_scorciatoia
                     if nuovo_g_scorciatoia < nuovo_g:
@@ -742,6 +750,13 @@ previsione_per_controllo = previsione_posizione_kalman
 # scalare di velocita', l'altro una direzione) e vanno misurati uno alla volta, altrimenti un
 # guadagno non e' attribuibile. Usata da ai_posizione/oracolo_posizione.py.
 previsione_per_evitamento = previsione_posizione_kalman
+
+# Punto di innesto della MACCHIA DI PROBABILITA', il terzo e il piu' a monte: e' la previsione che
+# il PIANIFICATORE vede, mentre i due precedenti servono i controlli. Tenerlo separato permette di
+# chiedersi quanto varrebbe una previsione perfetta per il solo canale che passa dalla mappa di
+# costo, senza toccare i controlli - la stessa domanda che ai_controllo/oracolo.py pone per la
+# velocita'. Usata da ai_predittiva/oracolo_previsione.py.
+previsione_per_macchia = previsione_posizione_kalman
 
 # ============================================================================================
 # REGIONE DI RISCHIO (macchia di probabilita')
@@ -1322,13 +1337,17 @@ def main():
     slot_da_salvare = None
     slot_vuoto_timer = 0
     modalita_rettangolo = False  # M: in attesa del primo/secondo click per riempire un'area rettangolare
+    modalita_persone_ferme = False  # S: ogni click sulla mappa aggiunge o toglie una persona ferma
     primo_punto_rettangolo = None
     messaggio_mappa_training_timer = 0
     messaggio_mappa_training_testo = ""
     registratore = RegistratoreVideo()  # V: avvia e ferma la registrazione della finestra
     messaggio_video_timer = 0
     messaggio_video = ("", VERDE)
-    frame_inizio_target = None  # frame in cui e' stato assegnato il target attuale (click): serve a calcolare il tempo di percorrenza all'arrivo
+    tempo_simulato = 0.0      # orologio della simulazione, in secondi: segue il cursore di velocita'
+    memoria_ferme = {}        # cella grossa -> (x, y, istante di scadenza) delle persone ferme viste
+    tempo_simulato_target = None  # secondi simulati dall'assegnazione del target (click): si accumula
+                                  # frame per frame, cosi' le pause e i cambi di velocita' non lo falsano
     messaggio_arrivo_timer = 0
     messaggio_arrivo_testo = ""
 
@@ -1389,6 +1408,7 @@ def main():
     robot_y = 1 * DIM_NODO + DIM_NODO // 2
     target_pos = None
     percorso = []
+    any_angle_attivo = True   # A: alterna fra Theta* (acceso) e A* classico (spento)
     celle_rilevate_precedenti = set()  # celle rilevate dal lidar nel frame precedente, senza rumore
     tracciamento_lidar = {}  # id(persona) -> traccia Kalman, solo per le persone attualmente rilevate
     storico_posizioni_lidar = {}  # id(persona) -> ultime FINESTRA_STORICO_FRAME stime: input della rete
@@ -1769,9 +1789,22 @@ def main():
                     mx, my = t_m(event.pos[0], event.pos[1])
                     r, c = int(my // DIM_NODO), int(mx // DIM_NODO)
                     if 0 <= r < Y_TOT and 0 <= c < X_TOT:
-                        target_pos = (r, c)
-                        percorso = []  # forza ricalcolo immediato verso il nuovo target
-                        frame_inizio_target = contatore_frame
+                        if modalita_persone_ferme:
+                            # stessa cella, stesso tasto: se una persona c'e' gia' la si toglie. Cosi'
+                            # si compone una scena a mano senza dover ricordare cosa si e' piazzato
+                            gia_presente = next((pf for pf in persone_ferme if (pf["r"], pf["c"]) == (r, c)), None)
+                            if gia_presente is not None:
+                                persone_ferme.remove(gia_presente)
+                            elif griglia[r][c].tipo != "muro":
+                                nodo = griglia[r][c]
+                                persone_ferme.append({"x": nodo.cx, "y": nodo.cy, "r": r, "c": c})
+                            # il contatore del pannello segue la lista, altrimenti la prima
+                            # sincronizzazione cancellerebbe quanto piazzato a mano
+                            numero_persone_ferme = len(persone_ferme)
+                        else:
+                            target_pos = (r, c)
+                            percorso = []  # forza ricalcolo immediato verso il nuovo target
+                            tempo_simulato_target = 0.0
 
             if event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 3: trascinando = False
@@ -1964,7 +1997,11 @@ def main():
                     frame_ultima_modifica_muro = contatore_frame
                     robot_x, robot_y = 1.5 * DIM_NODO, 1.5 * DIM_NODO
                     target_pos, percorso = None, []
-                if event.key == pygame.K_s: target_pos, percorso = None, []
+                if event.key == pygame.K_s:
+                    modalita_persone_ferme = not modalita_persone_ferme
+                if event.key == pygame.K_x: target_pos, percorso = None, []  # era su S, spostato qui
+                if event.key == pygame.K_ESCAPE and modalita_persone_ferme:
+                    modalita_persone_ferme = False
 
                 if event.key == pygame.K_f:
                     seguendo_robot = not seguendo_robot
@@ -2007,6 +2044,10 @@ def main():
                     path_salvata = salva_mappa_training(griglia)
                     messaggio_mappa_training_testo = f"Mappa training salvata: {os.path.basename(path_salvata)}"
                     messaggio_mappa_training_timer = 90
+
+                if event.key == pygame.K_a:
+                    any_angle_attivo = not any_angle_attivo
+                    percorso = []  # il percorso in corso e' dell'altro algoritmo: si rifa' subito
 
                 if event.key == pygame.K_v:
                     area_mappa = pygame.Rect(int(offset_x), int(offset_y),
@@ -2075,7 +2116,8 @@ def main():
         if rigenera_popolazione:
             rigenera_popolazione = False
             target_pos, percorso = None, []
-            frame_inizio_target = None
+            tempo_simulato_target = None
+            memoria_ferme.clear()  # scena rifatta: ricordare le vecchie posizioni sarebbe un errore
             persone = [crea_persona(griglia) for _ in range(numero_persone)]
             corridori = [crea_corridore(griglia) for _ in range(numero_corridori)]
             persone_ferme = [crea_persona_ferma(griglia) for _ in range(numero_persone_ferme)]
@@ -2173,6 +2215,23 @@ def main():
                 del tracciamento_lidar[pid_vecchio]
                 storico_posizioni_lidar.pop(pid_vecchio, None)
 
+        # memoria delle persone ferme. Ogni avvistamento rinfresca la scadenza; passati
+        # MEMORIA_PERSONE_FERME_S secondi senza rivederla, la voce cade. La chiave e' la cella della
+        # griglia grossa e non quella del robot, cosi' la memoria sopravvive a un cambio di risoluzione;
+        # il rumore del lidar puo' far occupare a una stessa persona due celle vicine, ed e' una
+        # rappresentazione onesta dell'incertezza sulla sua posizione
+        for xf, yf in ferme_rilevate:
+            memoria_ferme[(int(yf // DIM_NODO), int(xf // DIM_NODO))] = (xf, yf, tempo_simulato + MEMORIA_PERSONE_FERME_S)
+        for cella_scaduta in [k for k, v in memoria_ferme.items() if v[2] <= tempo_simulato]:
+            del memoria_ferme[cella_scaduta]
+
+        # da qui in avanti le ferme note sono quelle in memoria: contiene gia' tutte quelle viste in
+        # questo fotogramma, piu' quelle uscite di vista da meno di venti secondi
+        ferme_rilevate = [(x_mem, y_mem) for x_mem, y_mem, _ in memoria_ferme.values()]
+        for x_mem, y_mem in ferme_rilevate:
+            celle_rilevate_rumorose.add((max(0, min(Y_TOT * fattore_robot - 1, int(y_mem // dim_robot))),
+                                         max(0, min(X_TOT * fattore_robot - 1, int(x_mem // dim_robot)))))
+
         # alone attorno alle persone ferme rilevate: il raggio e' il piu' largo fra zona di sicurezza e
         # contatto fra i corpi, piu' un franco fisso
         raggio_alone_ferme = max(raggio_sicurezza, raggio_robot + raggio_persona) + MARGINE_ALONE_PERSONE_FERME_PX
@@ -2240,7 +2299,7 @@ def main():
                 e_ferma = traccia.get("ferma", False)
                 frame_futuri_effettivi = 0 if e_ferma else PREVISIONE_BLOB_FRAME
                 direzione_traccia = None if e_ferma else (traccia["vx"], traccia["vy"])
-                x_prev, y_prev = previsione_posizione_kalman(traccia, frame_futuri_effettivi)
+                x_prev, y_prev = previsione_per_macchia(traccia, frame_futuri_effettivi)
                 correzione = correzioni_ai.get(pid)
                 if correzione is not None:
                     x_prev += float(correzione[0])
@@ -2301,7 +2360,7 @@ def main():
                 for cella_alone, costo_alone_cella in mappa_costo_alone_ferme.items():
                     mappa_costo_extra_robot[cella_alone] = max(mappa_costo_extra_robot.get(cella_alone, 0.0), costo_alone_cella)
 
-                percorso = algoritmo_a_star(griglia_robot, (robot_x, robot_y), target_robot, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_extra_robot)
+                percorso = algoritmo_a_star(griglia_robot, (robot_x, robot_y), target_robot, celle_bloccate=celle_rilevate_rumorose, mappa_costo_extra=mappa_costo_extra_robot, any_angle=any_angle_attivo)
             meta_nodo = griglia_robot[target_robot[0]][target_robot[1]]
             velocita_nominale_robot = VELOCITA_ROBOT * moltiplicatore_velocita
             fattore_velocita_voluto = fattore_velocita_da_conflitto(
@@ -2324,13 +2383,11 @@ def main():
             if passo_muro:
                 percorso = []  # il passo tagliava un muro: ricalcola subito
             if arrivato:
-                if frame_inizio_target is not None:
-                    # tempo equivalente a velocita' 1x: i frame grezzi sottostimano di un fattore pari
-                    # al moltiplicatore di simulazione
-                    tempo_impiegato_s = (contatore_frame - frame_inizio_target) / 60 * moltiplicatore_velocita
-                    messaggio_arrivo_testo = f"Obiettivo raggiunto in {tempo_impiegato_s:.1f}s"
+                if tempo_simulato_target is not None:
+                    # tempo equivalente a velocita' 1x, gia' accumulato in secondi simulati
+                    messaggio_arrivo_testo = f"Obiettivo raggiunto in {tempo_simulato_target:.1f}s"
                     messaggio_arrivo_timer = 180  # 3 secondi a 60 FPS
-                    frame_inizio_target = None
+                    tempo_simulato_target = None
                 target_pos = None
 
         # 3b. Movimento persone, corridori e membri dei gruppi (stessa logica per tutti, cambia solo la velocita')
@@ -2478,6 +2535,10 @@ def main():
                                 compagno["inseguendo_leader"] = False
 
         contatore_frame += 1
+        tempo_simulato += moltiplicatore_velocita / 60
+        if tempo_simulato_target is not None:
+            tempo_simulato_target += moltiplicatore_velocita / 60  # a velocita' zero non avanza
+
 
         if seguendo_robot:
             offset_x = screen.get_width() / 2 - robot_x * zoom
@@ -2571,6 +2632,12 @@ def main():
             aiuto_txt = font.render(msg, True, ROSSO)
             screen.blit(aiuto_txt, (10, 10))
 
+        if modalita_persone_ferme:
+            aiuto_ferme = font.render(
+                f"Persone ferme: clicca per aggiungere o togliere ({len(persone_ferme)}) - S o Esc per uscire",
+                True, ROSSO)
+            screen.blit(aiuto_ferme, (10, 10))
+
         if messaggio_mappa_training_timer > 0:
             messaggio_mappa_training_timer -= 1
             msg_txt = font.render(messaggio_mappa_training_testo, True, VERDE)
@@ -2657,7 +2724,8 @@ def main():
             titolo = font.render("Pannello tecnico (TAB)", True, NERO)
             screen.blit(titolo, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["titolo"]))
 
-            vel_txt = font.render(f"Velocita simulazione: {moltiplicatore_velocita:.2f}x", True, NERO)
+            etichetta_velocita = "ferma" if moltiplicatore_velocita == 0 else f"{moltiplicatore_velocita:.2f}x"
+            vel_txt = font.render(f"Velocita simulazione: {etichetta_velocita}", True, NERO)
             screen.blit(vel_txt, (panel_rect.x + 15, panel_rect.y + Y_PANNELLO["vel_label"]))
 
             pygame.draw.rect(screen, GRIGIO, slider_rect)
@@ -2827,6 +2895,14 @@ def main():
 
         # il fotogramma va preso a disegno ultimato ma prima della spia REC, che serve a chi
         # guarda lo schermo e non deve finire nella clip
+        # ancorata all'angolo della finestra e non a quello della mappa: seguendo la mappa
+        # si spostava con pan e zoom, e in ripresa il movimento si notava piu' della scritta
+        targhetta = font.render("Theta*" if any_angle_attivo else "A* (8 direzioni)", True, NERO)
+        riquadro = targhetta.get_rect(topleft=(12, 12)).inflate(14, 8)
+        pygame.draw.rect(screen, BIANCO, riquadro)
+        pygame.draw.rect(screen, NERO, riquadro, 1)
+        screen.blit(targhetta, targhetta.get_rect(center=riquadro.center))
+
         registratore.cattura(screen)
         registratore.disegna_spia(screen, font)
 

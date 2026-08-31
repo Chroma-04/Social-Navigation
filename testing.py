@@ -189,7 +189,7 @@ def _mappa_costo(griglia, tracciamento_lidar, storico_posizioni, usa_ai, modello
         e_ferma = traccia.get("ferma", False)
         frame_futuri = 0 if e_ferma else orizzonte
         direzione = None if e_ferma else (traccia["vx"], traccia["vy"])
-        x_prev, y_prev = sim.previsione_posizione_kalman(traccia, frame_futuri)
+        x_prev, y_prev = sim.previsione_per_macchia(traccia, frame_futuri)
         correzione = correzioni_ai.get(pid)
         if correzione is not None:
             x_prev += float(correzione[0])
